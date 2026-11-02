@@ -37,13 +37,12 @@ std::string Operator::explain(int depth) const {
 bool SeqScanOp::next(Row& out) {
     if (done_) return false;
     RID rid;
-    if (!table_.heap().next(cursor_, rid, buf_)) {
+    if (!table_.next_row(cursor_, rid, out)) {
         done_ = true;
         return false;
     }
     cursor_ = rid;
     if (++cursor_.slot == 0) ++cursor_.page;
-    out = decode_row(buf_);
     return true;
 }
 

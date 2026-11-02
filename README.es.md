@@ -140,7 +140,7 @@ Los errores llegan como `atlas::DbError` con el código del servidor (`constrain
 | Representación de consultas | `src/sql/ast.h` | AST de sentencias y expresiones; las expresiones se pueden serializar a SQL (se usa para guardar `DEFAULT`/`CHECK`) |
 | Planificador | `src/engine/planner.cpp` | Expansión de `*`, resolución de columnas, empuje de predicados a cada tabla, elección de índice (igualdad, `IN`, rangos y `BETWEEN`), index nested-loop join cuando el `ON` es `a = b.col_indexada`, agregación, `ORDER BY` por alias/posición/expresión oculta |
 | Ejecutor | `src/engine/operators.cpp`, `session.cpp` | Operadores pull: SeqScan, IndexScan, Filter, NestedLoopJoin, IndexJoin, Aggregate, Project, Distinct, Sort, Limit. `Session` ejecuta sentencias y maneja autocommit/transacciones |
-| Almacenamiento | `src/storage/` | Páginas de 4 KiB con slots, buffer pool LRU por tabla, heap con mapa de espacio libre, WAL con CRC32 |
+| Almacenamiento | `src/storage/` | Páginas de 4 KiB con slots, buffer pool LRU por tabla, heap con mapa de espacio libre, WAL con CRC32. Las filas de más de 2 KB se parten en *chunks* encadenados detrás de un puntero (hasta 16 MiB por fila) |
 | Índices | `src/index/` | B+tree propio (split, préstamo y fusión; hojas encadenadas para rangos) con claves `(valor, RID)`, así que soporta duplicados. Cada índice vive en su propio archivo; los nodos se cargan del disco la primera vez que se usan |
 | Transacciones | `src/txn/`, `src/engine/database.cpp` | Undo log en memoria, redo log escrito al hacer commit, savepoints por sentencia, lock global de transacción |
 | Red | `src/net/` | Sockets multiplataforma, protocolo AWP, servidor (un hilo por conexión) y librería cliente |
@@ -266,7 +266,6 @@ líneas de Python sin dependencias.
   que un índice que se recorre entero termina ocupando RAM proporcional a su tamaño.
 - Índices, claves primarias y foráneas de una sola columna. No hay `ALTER TABLE`, subconsultas,
   `UNION` ni vistas.
-- Cada fila debe caber en una página (~4 KB).
 - Política no-steal: una transacción enorme mantiene todas sus páginas sucias en memoria.
 - El doublewrite buffer repara páginas dañadas por una caída durante un checkpoint. Una
   corrupción fuera de ese caso (por ejemplo, un disco que falla) se detecta pero no se repara.

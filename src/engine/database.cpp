@@ -87,9 +87,8 @@ Index& Table::add_index(IndexDef def, bool fresh) {
 
 void Table::build_index(Index& idx) {
     RID rid{0, 0};
-    std::string rec;
-    while (heap_.next(rid, rid, rec)) {
-        Row row = decode_row(rec);
+    Row row;
+    while (next_row(rid, rid, row)) {
         const Value& v = row[idx.column()];
         if (idx.def().unique && !v.is_null() && idx.find_other(v))
             constraint("cannot create unique index '" + idx.def().name + "': duplicate value " + v.to_sql());
@@ -102,34 +101,154 @@ void Table::remove_index(const std::string& name) {
     std::erase_if(indexes_, [&](const auto& idx) { return idx->def().name == name; });
 }
 
+// ---- overflow records ------------------------------------------------------
+//
+// Rows up to INLINE_LIMIT bytes are stored as a single heap record. Larger rows
+// become a chain of chunk records plus a small pointer record at the row's RID:
+//   pointer: FF 01 | u32 total length | u32 page, u16 slot of the first chunk
+//   chunk:   FF 02 | u32 page, u16 slot of the next chunk (END = none) | data
+// An inline row starts with its u16 column count, which never begins with 0xFF.
+
+namespace {
+constexpr size_t INLINE_LIMIT = 2000;
+constexpr size_t MAX_ROW_BYTES = 16u << 20;
+constexpr size_t CHUNK_HEADER = 8;
+constexpr size_t CHUNK_DATA = SlottedPage::MAX_RECORD - CHUNK_HEADER;
+constexpr RID END_OF_CHAIN{0xFFFFFFFFu, 0xFFFF};
+
+bool is_pointer(std::string_view r) { return r.size() >= 2 && uint8_t(r[0]) == 0xFF && r[1] == 0x01; }
+bool is_chunk(std::string_view r) { return r.size() >= 2 && uint8_t(r[0]) == 0xFF && r[1] == 0x02; }
+
+std::string make_link(uint8_t kind, uint32_t length, RID rid, std::string_view data = {}) {
+    ByteWriter w;
+    w.u8(0xFF);
+    w.u8(kind);
+    if (kind == 0x01) w.u32(length);
+    w.u32(rid.page);
+    w.u16(rid.slot);
+    w.raw(data.data(), data.size());
+    return w.take();
+}
+
+RID read_link(std::string_view r, size_t offset) {
+    ByteReader rd(r.substr(offset, 6));
+    RID rid;
+    rid.page = rd.u32();
+    rid.slot = rd.u16();
+    return rid;
+}
+}  // namespace
+
+std::optional<Row> Table::resolve(std::string_view record) {
+    if (is_chunk(record)) return std::nullopt;
+    if (!is_pointer(record)) return decode_row(record);
+    if (record.size() < 12) throw DbError(ErrorCode::Corruption, "truncated overflow pointer");
+    ByteReader rd(record.substr(2, 4));
+    uint32_t total = rd.u32();
+    std::string bytes;
+    bytes.reserve(total);
+    for (RID next = read_link(record, 6); next != END_OF_CHAIN;) {
+        auto chunk = heap_.get(next);
+        if (!chunk || !is_chunk(*chunk) || bytes.size() > total)
+            throw DbError(ErrorCode::Corruption, "broken overflow chain at " + next.to_string());
+        bytes.append(*chunk, CHUNK_HEADER);
+        next = read_link(*chunk, 2);
+    }
+    if (bytes.size() != total) throw DbError(ErrorCode::Corruption, "overflow row has the wrong length");
+    return decode_row(bytes);
+}
+
 std::optional<Row> Table::read(RID rid) {
     auto bytes = heap_.get(rid);
     if (!bytes) return std::nullopt;
-    return decode_row(*bytes);
+    return resolve(*bytes);
 }
 
-RID Table::raw_insert(const Row& row) {
-    RID rid = heap_.insert(encode_row(row));
+bool Table::next_row(RID from, RID& rid, Row& row) {
+    std::string rec;
+    while (heap_.next(from, rid, rec)) {
+        if (auto r = resolve(rec)) {
+            row = std::move(*r);
+            return true;
+        }
+        from = rid;
+        if (++from.slot == 0) ++from.page;
+    }
+    return false;
+}
+
+// Writes a row's bytes (inline, or as chunks + pointer) and returns its RID.
+RID Table::store(std::string bytes, std::vector<HeapChange>& changes) {
+    if (bytes.size() > MAX_ROW_BYTES)
+        throw DbError(ErrorCode::Constraint, "row too large (" + std::to_string(bytes.size()) + " bytes, max " +
+                                                 std::to_string(MAX_ROW_BYTES) + ")");
+    if (bytes.size() <= INLINE_LIMIT) {
+        RID rid = heap_.insert(bytes);
+        changes.push_back({rid, std::nullopt, std::move(bytes)});
+        return rid;
+    }
+    // Write chunks back to front so each one can point at its successor.
+    size_t count = (bytes.size() + CHUNK_DATA - 1) / CHUNK_DATA;
+    RID next = END_OF_CHAIN;
+    for (size_t i = count; i-- > 0;) {
+        size_t off = i * CHUNK_DATA;
+        std::string chunk =
+            make_link(0x02, 0, next, std::string_view(bytes).substr(off, std::min(CHUNK_DATA, bytes.size() - off)));
+        next = heap_.insert(chunk);
+        changes.push_back({next, std::nullopt, std::move(chunk)});
+    }
+    std::string pointer = make_link(0x01, static_cast<uint32_t>(bytes.size()), next);
+    RID rid = heap_.insert(pointer);
+    changes.push_back({rid, std::nullopt, std::move(pointer)});
+    return rid;
+}
+
+// Erases a row's record and, for overflow rows, its chunks.
+void Table::release(RID rid, std::vector<HeapChange>& changes) {
+    auto main = heap_.get(rid);
+    if (!main) return;
+    heap_.erase(rid);
+    std::string record = std::move(*main);
+    RID next = is_pointer(record) ? read_link(record, 6) : END_OF_CHAIN;
+    changes.push_back({rid, std::move(record), std::nullopt});
+    while (next != END_OF_CHAIN) {
+        auto chunk = heap_.get(next);
+        if (!chunk || !is_chunk(*chunk)) throw DbError(ErrorCode::Corruption, "broken overflow chain");
+        RID following = read_link(*chunk, 2);
+        heap_.erase(next);
+        changes.push_back({next, std::move(*chunk), std::nullopt});
+        next = following;
+    }
+}
+
+void Table::undo_heap(const std::vector<HeapChange>& changes) {
+    for (auto it = changes.rbegin(); it != changes.rend(); ++it) {
+        if (it->before) heap_.put(it->rid, *it->before);
+        else heap_.erase(it->rid);
+    }
+}
+
+RID Table::insert_row(const Row& row, std::vector<HeapChange>& changes) {
+    RID rid = store(encode_row(row), changes);
     for (auto& idx : indexes_) idx->insert(row[idx->column()], rid);
     return rid;
 }
 
-void Table::raw_put(RID rid, const Row& row) {
-    heap_.put(rid, encode_row(row));
-    for (auto& idx : indexes_) idx->insert(row[idx->column()], rid);
-}
-
-void Table::raw_erase(RID rid, const Row& old_row) {
-    heap_.erase(rid);
+void Table::erase_row(RID rid, const Row& old_row, std::vector<HeapChange>& changes) {
+    release(rid, changes);
     for (auto& idx : indexes_) idx->erase(old_row[idx->column()], rid);
 }
 
-RID Table::raw_update(RID rid, const Row& old_row, const Row& new_row) {
+RID Table::update_row(RID rid, const Row& old_row, const Row& new_row, std::vector<HeapChange>& changes) {
     std::string bytes = encode_row(new_row);
     RID out = rid;
-    if (!heap_.update(rid, bytes)) {
-        heap_.erase(rid);
-        out = heap_.insert(bytes);
+    auto current = heap_.get(rid);
+    if (!current) throw DbError(ErrorCode::Internal, "update of a missing row at " + rid.to_string());
+    if (!is_pointer(*current) && bytes.size() <= INLINE_LIMIT && heap_.update(rid, bytes)) {
+        changes.push_back({rid, std::move(*current), std::move(bytes)});
+    } else {
+        release(rid, changes);
+        out = store(std::move(bytes), changes);
     }
     for (auto& idx : indexes_) {
         const Value& before = old_row[idx->column()];
@@ -147,8 +266,8 @@ uint64_t Table::row_count() {
     if (!indexes_.empty()) return indexes_.front()->size();
     uint64_t n = 0;
     RID rid{0, 0};
-    std::string rec;
-    while (heap_.next(rid, rid, rec)) {
+    Row row;
+    while (next_row(rid, rid, row)) {
         ++n;
         if (++rid.slot == 0) ++rid.page;
     }
@@ -329,15 +448,17 @@ void Database::apply_redo(const LogRecord& rec) {
             if (!t) return;
             auto& heap = t->heap();
             if (heap.page_lsn_for_redo(rec.rid.page) >= rec.lsn) return;  // already on disk
-            // Keep the persistent indexes in step with the heap.
+            // Keep the persistent indexes in step with the heap. Overflow chunks are
+            // written before their pointer and erased after it, so resolving a row
+            // here always finds its whole chain.
             if (auto old = heap.get(rec.rid)) {
-                Row old_row = decode_row(*old);
-                for (const auto& idx : t->indexes()) idx->erase(old_row[idx->column()], rec.rid);
+                if (auto old_row = t->resolve(*old))
+                    for (const auto& idx : t->indexes()) idx->erase((*old_row)[idx->column()], rec.rid);
             }
             if (rec.type == LogType::Put) {
                 heap.put(rec.rid, rec.payload);
-                Row row = decode_row(rec.payload);
-                for (const auto& idx : t->indexes()) idx->insert(row[idx->column()], rec.rid);
+                if (auto row = t->resolve(rec.payload))
+                    for (const auto& idx : t->indexes()) idx->insert((*row)[idx->column()], rec.rid);
             } else {
                 heap.erase(rec.rid);
             }
@@ -533,6 +654,7 @@ void Database::create_table(const CreateTableStmt& stmt) {
         throw DbError(ErrorCode::Semantic, "table '" + stmt.name + "' already exists");
     }
     if (stmt.columns.empty()) throw DbError(ErrorCode::Semantic, "a table needs at least one column");
+    if (stmt.columns.size() > 1000) throw DbError(ErrorCode::Semantic, "a table can have at most 1000 columns");
 
     TableSchema schema;
     schema.name = stmt.name;
@@ -812,14 +934,11 @@ void Database::rollback(Transaction& txn, Transaction::Savepoint to) {
         txn.undo.pop_back();
         Table* t = table_by_id(u.table_id);
         if (!t) continue;
-        switch (u.kind) {
-            case UndoEntry::Kind::Insert: t->raw_erase(u.rid, u.new_row); break;
-            case UndoEntry::Kind::Delete: t->raw_put(u.rid, u.old_row); break;
-            case UndoEntry::Kind::Update:
-                t->raw_erase(u.new_rid, u.new_row);
-                t->raw_put(u.rid, u.old_row);
-                break;
+        for (const auto& idx : t->indexes()) {
+            if (u.kind != UndoEntry::Kind::Delete) idx->erase(u.new_row[idx->column()], u.new_rid);
+            if (u.kind != UndoEntry::Kind::Insert) idx->insert(u.old_row[idx->column()], u.rid);
         }
+        t->undo_heap(u.changes);
     }
     txn.redo.resize(std::min(txn.redo.size(), to.redo_size));
 }
@@ -911,9 +1030,8 @@ void Database::check_not_referenced(Table& parent, const Row& old_row, std::opti
                     if (!is_self(rid)) referenced = true;
             } else {
                 RID rid{0, 0};
-                std::string rec;
-                while (!referenced && child->heap().next(rid, rid, rec)) {
-                    Row r = decode_row(rec);
+                Row r;
+                while (!referenced && child->next_row(rid, rid, r)) {
                     if (!r[j].is_null() && r[j] == v && !is_self(rid)) referenced = true;
                     if (++rid.slot == 0) ++rid.page;
                 }
@@ -925,32 +1043,37 @@ void Database::check_not_referenced(Table& parent, const Row& old_row, std::opti
     }
 }
 
+// Turns physical heap changes into redo records. The new record bytes move into
+// the log (undo only needs the before-images), so each row is encoded once.
+void Database::log_changes(Transaction& txn, Table& t, std::vector<HeapChange>& changes) {
+    for (auto& c : changes) {
+        LogRecord rec;
+        rec.type = c.after ? LogType::Put : LogType::Erase;
+        rec.table_id = t.id();
+        rec.rid = c.rid;
+        if (c.after) rec.payload = std::move(*c.after);
+        c.after.reset();
+        txn.redo.push_back(std::move(rec));
+    }
+}
+
 RID Database::insert_row(Transaction& txn, Table& t, Row row) {
     row = validate_row(t, std::move(row));
     check_unique(t, row, std::nullopt);
     check_foreign_keys(t, row);
-    RID rid = t.raw_insert(row);
-
-    LogRecord rec;
-    rec.type = LogType::Put;
-    rec.table_id = t.id();
-    rec.rid = rid;
-    rec.payload = encode_row(row);
-    txn.redo.push_back(std::move(rec));
-    txn.undo.push_back(UndoEntry{UndoEntry::Kind::Insert, t.id(), rid, rid, {}, std::move(row)});
+    std::vector<HeapChange> changes;
+    RID rid = t.insert_row(row, changes);
+    log_changes(txn, t, changes);
+    txn.undo.push_back(UndoEntry{UndoEntry::Kind::Insert, t.id(), rid, rid, {}, std::move(row), std::move(changes)});
     return rid;
 }
 
 void Database::delete_row(Transaction& txn, Table& t, RID rid, const Row& old_row) {
     check_not_referenced(t, old_row, rid, nullptr);
-    t.raw_erase(rid, old_row);
-
-    LogRecord rec;
-    rec.type = LogType::Erase;
-    rec.table_id = t.id();
-    rec.rid = rid;
-    txn.redo.push_back(std::move(rec));
-    txn.undo.push_back(UndoEntry{UndoEntry::Kind::Delete, t.id(), rid, rid, old_row, {}});
+    std::vector<HeapChange> changes;
+    t.erase_row(rid, old_row, changes);
+    log_changes(txn, t, changes);
+    txn.undo.push_back(UndoEntry{UndoEntry::Kind::Delete, t.id(), rid, rid, old_row, {}, std::move(changes)});
 }
 
 RID Database::update_row(Transaction& txn, Table& t, RID rid, const Row& old_row, Row new_row) {
@@ -958,22 +1081,11 @@ RID Database::update_row(Transaction& txn, Table& t, RID rid, const Row& old_row
     check_unique(t, new_row, rid);
     check_foreign_keys(t, new_row);
     check_not_referenced(t, old_row, rid, &new_row);
-    RID new_rid = t.raw_update(rid, old_row, new_row);
-
-    if (new_rid != rid) {
-        LogRecord erase;
-        erase.type = LogType::Erase;
-        erase.table_id = t.id();
-        erase.rid = rid;
-        txn.redo.push_back(std::move(erase));
-    }
-    LogRecord put;
-    put.type = LogType::Put;
-    put.table_id = t.id();
-    put.rid = new_rid;
-    put.payload = encode_row(new_row);
-    txn.redo.push_back(std::move(put));
-    txn.undo.push_back(UndoEntry{UndoEntry::Kind::Update, t.id(), rid, new_rid, old_row, std::move(new_row)});
+    std::vector<HeapChange> changes;
+    RID new_rid = t.update_row(rid, old_row, new_row, changes);
+    log_changes(txn, t, changes);
+    txn.undo.push_back(
+        UndoEntry{UndoEntry::Kind::Update, t.id(), rid, new_rid, old_row, std::move(new_row), std::move(changes)});
     return new_rid;
 }
 

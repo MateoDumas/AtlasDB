@@ -12,6 +12,7 @@
 
 using namespace atlas;
 using atlas::test::TestDb;
+using atlas::params;
 
 TEST_CASE("data survives a clean restart", "[recovery]") {
     TestDb t;
@@ -189,8 +190,8 @@ void check_indexes_match_table(TestDb& t) {
         // Count by scanning the heap: row_count() itself is answered from an index.
         uint64_t rows = 0;
         RID rid{0, 0};
-        std::string rec;
-        while (table->heap().next(rid, rid, rec)) {
+        Row row;
+        while (table->next_row(rid, rid, row)) {
             ++rows;
             if (++rid.slot == 0) ++rid.page;
         }
@@ -326,4 +327,134 @@ TEST_CASE("an incomplete doublewrite buffer is ignored", "[recovery][doublewrite
     t.open();
     CHECK(t.count("e") == 2);
     CHECK_FALSE(std::filesystem::exists(t.dir.path / "doublewrite.buf"));
+}
+
+namespace {
+// Physical heap records (rows + overflow pointers + chunks), to detect leaked chunks.
+size_t heap_records(Table& t) {
+    size_t n = 0;
+    RID rid{0, 0};
+    std::string rec;
+    while (t.heap().next(rid, rid, rec)) {
+        ++n;
+        if (++rid.slot == 0) ++rid.page;
+    }
+    return n;
+}
+std::string big(size_t n, char c) { return std::string(n, c); }
+}  // namespace
+
+TEST_CASE("rows larger than a page use overflow chunks", "[storage][overflow]") {
+    TestDb t;
+    auto& s = *t.session;
+    t.run("CREATE TABLE doc (id INT PRIMARY KEY, body TEXT, tag TEXT)");
+    s.execute("INSERT INTO doc VALUES ($1, $2, $3)", params(1, big(50'000, 'a'), "x"));
+    s.execute("INSERT INTO doc VALUES ($1, $2, $3)", params(2, big(9'000, 'b'), "y"));
+    s.execute("INSERT INTO doc VALUES ($1, $2, $3)", params(3, "small", "z"));
+    Table& table = t.db->table("doc");
+    CHECK(heap_records(table) > 3);  // chunks exist
+
+    CHECK(t.scalar("SELECT LENGTH(body) FROM doc WHERE id = 1").as_int() == 50'000);
+    CHECK(t.scalar("SELECT SUBSTR(body, 49999, 2) FROM doc WHERE id = 1").as_text() == "aa");
+    CHECK(t.count("doc WHERE body LIKE 'bbb%'") == 1);  // full scan resolves chains too
+
+    // Grow, shrink, and replace in both directions; no chunk may leak.
+    s.execute("UPDATE doc SET body = $1 WHERE id = 3", params(big(30'000, 'c')));
+    s.execute("UPDATE doc SET body = 'tiny' WHERE id = 1");
+    s.execute("UPDATE doc SET tag = 'changed' WHERE id = 2");  // big row, small change
+    CHECK(t.scalar("SELECT LENGTH(body) FROM doc WHERE id = 3").as_int() == 30'000);
+    CHECK(t.scalar("SELECT body FROM doc WHERE id = 1").as_text() == "tiny");
+    CHECK(t.scalar("SELECT LENGTH(body) || tag FROM doc WHERE id = 2").as_text() == "9000changed");
+    s.execute("UPDATE doc SET body = 'x'");
+    CHECK(heap_records(table) == 3);
+    t.run("DELETE FROM doc");
+    CHECK(heap_records(table) == 0);
+
+    // Indexed large values work too (index nodes span several pages).
+    t.run("CREATE INDEX doc_body ON doc (body)");
+    s.execute("INSERT INTO doc VALUES ($1, $2, 't')", params(5, big(12'000, 'k')));
+    CHECK(t.count("doc WHERE body = '" + big(12'000, 'k') + "'") == 1);
+
+    try {
+        s.execute("INSERT INTO doc VALUES ($1, $2, 't')", params(6, big(17u << 20, 'q')));
+        FAIL("expected a row-too-large error");
+    } catch (const DbError& e) {
+        CHECK(e.code() == ErrorCode::Constraint);
+    }
+}
+
+TEST_CASE("rollback restores overflow rows exactly", "[storage][overflow][txn]") {
+    TestDb t;
+    auto& s = *t.session;
+    t.run("CREATE TABLE r (id INT PRIMARY KEY, body TEXT)");
+    s.execute("INSERT INTO r VALUES (1, $1)", params(big(20'000, 'o')));
+    s.execute("INSERT INTO r VALUES (2, 'short')");
+    Table& table = t.db->table("r");
+    size_t records = heap_records(table);
+
+    t.run("BEGIN");
+    s.execute("UPDATE r SET body = 'now small' WHERE id = 1");
+    s.execute("UPDATE r SET body = $1 WHERE id = 2", params(big(15'000, 'n')));
+    s.execute("INSERT INTO r VALUES (3, $1)", params(big(8'000, 'i')));
+    t.run("DELETE FROM r WHERE id = 1");
+    t.run("ROLLBACK");
+
+    CHECK(heap_records(table) == records);
+    CHECK(t.scalar("SELECT body FROM r WHERE id = 1").as_text() == big(20'000, 'o'));
+    CHECK(t.scalar("SELECT body FROM r WHERE id = 2").as_text() == "short");
+    CHECK(t.count("r") == 2);
+
+    // Slots freed by the rolled-back work are reused by later inserts; recovery must
+    // reproduce exactly the same layout (records were logged at their real slots).
+    for (int i = 10; i < 20; ++i) s.execute("INSERT INTO r VALUES ($1, $2)", params(i, big(3'000 + i, 'p')));
+    t.crash_and_recover();
+    CHECK(t.scalar("SELECT body FROM r WHERE id = 1").as_text() == big(20'000, 'o'));
+    CHECK(t.count("r") == 12);
+    CHECK(t.scalar("SELECT LENGTH(body) FROM r WHERE id = 19").as_int() == 3'019);
+    check_indexes_match_table(t);
+}
+
+TEST_CASE("random workload with large rows survives crashes", "[recovery][overflow]") {
+    DatabaseOptions opts;
+    opts.checkpoint_wal_bytes = 256 * 1024;
+    opts.cache_pages_per_table = 16;
+    TestDb t(opts);
+    t.run("CREATE TABLE kv (k INT PRIMARY KEY, v TEXT)");
+    std::map<int64_t, std::string> model;
+    std::mt19937 rng(99);
+    auto random_value = [&] {
+        size_t len = rng() % 4 == 0 ? 2'000 + rng() % 25'000 : rng() % 300;
+        return std::string(len, static_cast<char>('a' + rng() % 26));
+    };
+    for (int round = 0; round < 4; ++round) {
+        for (int op = 0; op < 150; ++op) {
+            int64_t k = rng() % 60;
+            bool in_txn = rng() % 4 == 0;
+            bool commit = rng() % 2 == 0;
+            if (in_txn) t.run("BEGIN");
+            std::string v = random_value();
+            int choice = static_cast<int>(rng() % 3);
+            if (choice == 0 && !model.count(k)) {
+                t.session->execute("INSERT INTO kv VALUES ($1, $2)", params(k, v));
+                if (!in_txn || commit) model[k] = v;
+            } else if (choice == 1) {
+                t.session->execute("UPDATE kv SET v = $1 WHERE k = $2", params(v, k));
+                if ((!in_txn || commit) && model.count(k)) model[k] = v;
+            } else {
+                t.session->execute("DELETE FROM kv WHERE k = $1", params(k));
+                if (!in_txn || commit) model.erase(k);
+            }
+            if (in_txn) t.run(commit ? "COMMIT" : "ROLLBACK");
+        }
+        t.crash_and_recover();
+        auto rows = t.run("SELECT k, v FROM kv ORDER BY k").rows;
+        REQUIRE(rows.size() == model.size());
+        size_t i = 0;
+        for (const auto& [k, v] : model) {
+            REQUIRE(rows[i][0].as_int() == k);
+            REQUIRE(rows[i][1].as_text() == v);
+            ++i;
+        }
+        check_indexes_match_table(t);
+    }
 }

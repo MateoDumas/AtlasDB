@@ -56,16 +56,26 @@ public:
     const std::vector<ExprPtr>& checks() const { return checks_; }
 
     std::optional<Row> read(RID rid);
+    // Iterates rows in heap order starting at `from`; skips overflow chunks.
+    bool next_row(RID from, RID& rid, Row& row);
+    // Full row stored in a heap record: decodes it, following overflow chunks.
+    // Returns nullopt for overflow chunk records (they are not rows).
+    std::optional<Row> resolve(std::string_view record);
 
-    // Storage-level mutations that keep indexes in sync. No logging or constraint checks.
-    RID raw_insert(const Row& row);
-    void raw_put(RID rid, const Row& row);
-    void raw_erase(RID rid, const Row& old_row);
-    RID raw_update(RID rid, const Row& old_row, const Row& new_row);
+    // Row mutations that keep indexes in sync and report every physical heap
+    // change made (for the WAL and for undo). No logging or constraint checks.
+    RID insert_row(const Row& row, std::vector<HeapChange>& changes);
+    void erase_row(RID rid, const Row& old_row, std::vector<HeapChange>& changes);
+    RID update_row(RID rid, const Row& old_row, const Row& new_row, std::vector<HeapChange>& changes);
+    // Restores the heap exactly as it was before `changes` (applied in reverse).
+    void undo_heap(const std::vector<HeapChange>& changes);
 
     uint64_t row_count();
 
 private:
+    RID store(std::string bytes, std::vector<HeapChange>& changes);
+    void release(RID rid, std::vector<HeapChange>& changes);
+
     TableSchema schema_;
     TableHeap heap_;
     std::vector<std::unique_ptr<Index>> indexes_;
@@ -152,6 +162,7 @@ private:
     void check_unique(Table& t, const Row& row, std::optional<RID> self);
     void check_foreign_keys(Table& t, const Row& row);
     void check_not_referenced(Table& parent, const Row& old_row, std::optional<RID> self, const Row* new_row);
+    void log_changes(Transaction& txn, Table& t, std::vector<HeapChange>& changes);
 
     std::filesystem::path dir_;
     DatabaseOptions options_;

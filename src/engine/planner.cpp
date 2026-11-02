@@ -585,9 +585,9 @@ std::vector<std::pair<RID, Row>> TableScanPlan::collect() const {
             if (auto row = table->read(rid)) consider(rid, std::move(*row));
     } else {
         RID rid{0, 0};
-        std::string rec;
-        while (table->heap().next(rid, rid, rec)) {
-            consider(rid, decode_row(rec));
+        Row row;
+        while (table->next_row(rid, rid, row)) {
+            consider(rid, row);
             if (++rid.slot == 0) ++rid.page;
         }
     }

@@ -34,7 +34,7 @@ ERROR (constraint_violation): foreign key violation: books.author_id = 99 has no
 ## Highlights
 
 - **Storage engine**: 4 KiB slotted pages with CRC32 checksums, an LRU buffer pool, heap files
-  with a lazily built free-space map.
+  with a lazily built free-space map, and overflow chains for rows larger than a page (up to 16 MiB).
 - **Persistent B+tree indexes**: one file per index; nodes are loaded on first use, so opening a
   100k-row database takes ~18 ms instead of rebuilding indexes from the table.
 - **Crash safety**: redo-only WAL with **group commit** (concurrent commits share one `fsync`), page LSNs, and **atomic checkpoints
@@ -143,7 +143,7 @@ directly with `atlas::Database::open(dir)` and `atlas::Session`.
 | Front-end | [src/sql/](src/sql/) | Tokens carry line/column for error messages; expressions serialize back to SQL (used to store `DEFAULT`/`CHECK`) |
 | Planner | [planner.cpp](src/engine/planner.cpp) | Star expansion, name resolution, predicate pushdown, index selection, index joins, aggregation rewriting |
 | Executor | [operators.cpp](src/engine/operators.cpp) | SeqScan, IndexScan, Filter, NestedLoopJoin, IndexJoin, Aggregate, Project, Distinct, Sort, Limit |
-| Storage | [src/storage/](src/storage/) | Slotted pages, buffer pool (no-steal), heap, WAL |
+| Storage | [src/storage/](src/storage/) | Slotted pages, buffer pool (no-steal), heap, WAL. Rows over 2 KB are split into chunk records behind a pointer; every physical record change is logged and undone byte for byte, so recovery rebuilds the exact same layout |
 | Indexes | [src/index/](src/index/) | B+tree with split / borrow / merge over a pluggable node store (in-memory or paged) |
 | Concurrency | [src/txn/](src/txn/) | Session-owned reader/writer lock with writer preference |
 | Network | [src/net/](src/net/) | Portable sockets, AWP encoding, server, client |
@@ -195,7 +195,6 @@ pipelined (`Prepare` and `Execute` sent together) for a single round trip. Full 
 
 - One writer at a time (readers run in parallel). Next step: MVCC.
 - Single-column indexes and keys; no subqueries, `UNION`, `ALTER TABLE` or views yet.
-- A row must fit in one page (~4 KB); no overflow pages yet.
 - Loaded index nodes stay in memory (no eviction of clean nodes yet).
 - Planned: hash joins, cost-based planning with statistics, authentication and TLS for the server.
 

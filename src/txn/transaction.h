@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "common/value.h"
@@ -9,7 +11,19 @@
 
 namespace atlas {
 
-// One logical change, kept so it can be reverted on ROLLBACK.
+// One physical heap record change. `before` is the previous record (or none if
+// the slot was empty); `after` the new one (or none if the record was erased).
+// A row larger than a page spans several records (pointer + chunks), so one
+// row operation produces several changes.
+struct HeapChange {
+    RID rid;
+    std::optional<std::string> before;
+    std::optional<std::string> after;
+};
+
+// One row change, kept so it can be reverted on ROLLBACK. The heap is restored
+// byte for byte from `changes` (so every record returns to its exact slot,
+// which the redo log relies on); the indexes are restored from the rows.
 struct UndoEntry {
     enum class Kind { Insert, Delete, Update } kind;
     uint32_t table_id = 0;
@@ -17,6 +31,7 @@ struct UndoEntry {
     RID new_rid;  // Update: location after the change (may differ if the row moved)
     Row old_row;
     Row new_row;
+    std::vector<HeapChange> changes;
 };
 
 // State of an in-flight transaction.
