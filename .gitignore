@@ -1,0 +1,7 @@
+build/
+build-*/
+atlas_data/
+demo_data/
+*.tbl
+wal.log
+catalog.bin
