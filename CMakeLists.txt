@@ -14,17 +14,11 @@ option(ATLAS_BUILD_TESTS "Build the Catch2 test suite" ON)
 option(ATLAS_BUILD_BENCHMARKS "Build the Google Benchmark suite" ON)
 option(ATLAS_BUILD_EXAMPLES "Build example client applications" ON)
 option(ATLAS_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
-option(ATLAS_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
 
 set(ATLAS_SANITIZE "" CACHE STRING "Sanitizers to enable, e.g. 'address,undefined' or 'thread' (GCC/Clang)")
 if(ATLAS_SANITIZE)
   add_compile_options(-fsanitize=${ATLAS_SANITIZE} -fno-omit-frame-pointer -fno-sanitize-recover=all)
   add_link_options(-fsanitize=${ATLAS_SANITIZE})
-endif()
-
-if(ATLAS_BUILD_FUZZERS)
-  # Coverage instrumentation for everything; the fuzz targets link the driver.
-  add_compile_options(-fsanitize=fuzzer-no-link)
 endif()
 
 if(ATLAS_BUILD_FUZZERS)
@@ -145,15 +139,6 @@ if(ATLAS_BUILD_BENCHMARKS)
   add_executable(atlas_bench bench/bench_main.cpp)
   target_link_libraries(atlas_bench PRIVATE atlas_core benchmark::benchmark_main)
   atlas_static_link(atlas_bench)
-endif()
-
-if(ATLAS_BUILD_FUZZERS)
-  foreach(target fuzz_sql fuzz_protocol)
-    add_executable(${target} fuzz/${target}.cpp)
-    target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-    target_link_libraries(${target} PRIVATE atlas_core)
-    target_link_options(${target} PRIVATE -fsanitize=fuzzer)
-  endforeach()
 endif()
 
 if(ATLAS_BUILD_FUZZERS)

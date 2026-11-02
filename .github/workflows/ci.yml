@@ -84,33 +84,6 @@ jobs:
           name: fuzz-crashes
           path: crash-*
 
-  fuzz:
-    name: Fuzzing (libFuzzer)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install Ninja
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
-      - name: Configure
-        run: >
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          -DCMAKE_CXX_COMPILER=clang++-18 -DATLAS_BUILD_FUZZERS=ON -DATLAS_SANITIZE=address,undefined
-          -DATLAS_BUILD_TESTS=OFF -DATLAS_BUILD_BENCHMARKS=OFF -DATLAS_BUILD_EXAMPLES=OFF
-      - name: Build
-        run: cmake --build build --target fuzz_sql fuzz_protocol
-      - name: Fuzz SQL engine (2 min)
-        run: |
-          mkdir -p corpus && cp fuzz/corpus/sql/* corpus/
-          ./build/fuzz_sql -max_total_time=120 -max_len=512 -timeout=10 -artifact_prefix=crash- corpus
-      - name: Fuzz protocol decoders (1 min)
-        run: ./build/fuzz_protocol -max_total_time=60 -max_len=1024 -artifact_prefix=crash-
-      - name: Upload crashing inputs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fuzz-crashes
-          path: crash-*
-
   sanitizers:
     name: Sanitizers (${{ matrix.sanitizer }})
     runs-on: ubuntu-24.04
