@@ -1,0 +1,1 @@
+SELECT DISTINCT flag FROM a ORDER BY flag

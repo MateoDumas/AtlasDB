@@ -1,0 +1,1 @@
+SELECT UPPER(name) || '-' || SUBSTR(note, 1, 2) FROM a, b WHERE a.id = b.a_id

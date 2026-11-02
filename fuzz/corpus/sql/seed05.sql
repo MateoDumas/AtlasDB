@@ -1,0 +1,1 @@
+SELECT id FROM a WHERE name LIKE 'x%' OR score IN (1.5, 2.5) OR flag IS NULL

@@ -1,0 +1,1 @@
+SELECT a.name, b.note FROM a LEFT JOIN b ON b.a_id = a.id WHERE a.score BETWEEN 0 AND 3

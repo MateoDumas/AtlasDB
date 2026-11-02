@@ -1,0 +1,1 @@
+INSERT INTO a (id, name, score) VALUES (4, 'z', 3.5)

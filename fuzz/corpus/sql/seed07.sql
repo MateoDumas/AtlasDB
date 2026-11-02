@@ -1,0 +1,1 @@
+INSERT INTO b SELECT id + 100, id, name FROM a

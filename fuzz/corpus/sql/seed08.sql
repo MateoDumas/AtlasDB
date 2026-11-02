@@ -1,0 +1,1 @@
+UPDATE a SET score = score * 2, name = COALESCE(name, 'n') WHERE id > 1
