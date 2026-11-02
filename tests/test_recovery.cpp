@@ -186,7 +186,14 @@ namespace {
 // Every index must contain exactly one entry per row (NULLs included).
 void check_indexes_match_table(TestDb& t) {
     for (Table* table : t.db->tables()) {
-        uint64_t rows = table->row_count();
+        // Count by scanning the heap: row_count() itself is answered from an index.
+        uint64_t rows = 0;
+        RID rid{0, 0};
+        std::string rec;
+        while (table->heap().next(rid, rid, rec)) {
+            ++rows;
+            if (++rid.slot == 0) ++rid.page;
+        }
         for (const auto& idx : table->indexes()) {
             INFO("index " << idx->def().name);
             CHECK(idx->size() == rows);

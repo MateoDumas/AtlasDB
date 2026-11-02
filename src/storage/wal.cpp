@@ -26,8 +26,18 @@ void Wal::append(const std::vector<LogRecord>& records, bool sync) {
         out.u32(crc32(body.data().data(), body.size()));
         out.raw(body.data().data(), body.size());
     }
-    file_.write_at(size_, out.data().data(), out.size());
-    if (sync) file_.sync();
+    try {
+        file_.write_at(size_, out.data().data(), out.size());
+        if (sync) file_.sync();
+    } catch (...) {
+        // Cut off whatever part of the batch reached the file, so a later
+        // recovery cannot mistake it for a committed transaction.
+        try {
+            file_.truncate(size_);
+        } catch (...) {
+        }
+        throw;
+    }
     size_ += out.size();
 }
 

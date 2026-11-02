@@ -143,6 +143,8 @@ RID Table::raw_update(RID rid, const Row& old_row, const Row& new_row) {
 }
 
 uint64_t Table::row_count() {
+    // Every index has exactly one entry per row (NULL values included).
+    if (!indexes_.empty()) return indexes_.front()->size();
     uint64_t n = 0;
     RID rid{0, 0};
     std::string rec;
@@ -358,7 +360,7 @@ void Database::apply_redo(const LogRecord& rec) {
             if (Table* t = table_by_id(rec.table_id)) {
                 dropped_files_.push_back(table_path(t->id()));
                 for (const auto& idx : t->indexes()) dropped_files_.push_back(t->index_path(idx->def().id));
-                tables_.erase(t->name());
+                remove_table(t->name());
             }
             return;
         }
@@ -463,9 +465,13 @@ Table& Database::table(const std::string& name) {
 }
 
 Table* Database::table_by_id(uint32_t id) {
-    for (auto& [name, t] : tables_)
-        if (t->id() == id) return t.get();
-    return nullptr;
+    auto it = tables_by_id_.find(id);
+    return it == tables_by_id_.end() ? nullptr : it->second;
+}
+
+void Database::remove_table(const std::string& name) {
+    if (Table* t = find_table(name)) tables_by_id_.erase(t->id());
+    tables_.erase(name);
 }
 
 std::vector<Table*> Database::tables() {
@@ -489,6 +495,7 @@ void Database::create_table_internal(TableSchema schema, const std::vector<Index
     auto t = std::make_unique<Table>(std::move(schema), path, dir_, options_.cache_pages_per_table);
     for (const auto& def : indexes) t->add_index(def, fresh_files);
     std::string name = t->name();
+    tables_by_id_[t->id()] = t.get();
     tables_[name] = std::move(t);
 }
 
@@ -620,7 +627,7 @@ void Database::create_table(const CreateTableStmt& stmt) {
     try {
         log_ddl(std::move(rec));
     } catch (...) {
-        tables_.erase(name);
+        remove_table(name);
         throw;
     }
 }
@@ -644,7 +651,7 @@ void Database::drop_table(const std::string& name, bool if_exists) {
     log_ddl(std::move(rec));
     dropped_files_.push_back(table_path(t->id()));
     for (const auto& idx : t->indexes()) dropped_files_.push_back(t->index_path(idx->def().id));
-    tables_.erase(name);
+    remove_table(name);
 }
 
 void Database::create_index(const CreateIndexStmt& stmt) {

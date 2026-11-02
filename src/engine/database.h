@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "catalog/schema.h"
@@ -129,6 +130,7 @@ private:
     void apply_redo(const LogRecord& rec);
     void create_table_internal(TableSchema schema, const std::vector<IndexDef>& indexes, bool fresh_files);
     void replay_doublewrite();
+    void remove_table(const std::string& name);
     void remove_orphan_files();
     void log_ddl(LogRecord rec);
     void maybe_checkpoint();
@@ -143,6 +145,7 @@ private:
     FileLock dir_lock_;
     std::unique_ptr<Wal> wal_;
     std::map<std::string, std::unique_ptr<Table>> tables_;
+    std::unordered_map<uint32_t, Table*> tables_by_id_;
     std::vector<std::filesystem::path> dropped_files_;  // deleted at the next checkpoint
     uint32_t next_table_id_ = 1;
     uint32_t next_index_id_ = 1;
