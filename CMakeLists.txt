@@ -14,6 +14,12 @@ option(ATLAS_BUILD_TESTS "Build the Catch2 test suite" ON)
 option(ATLAS_BUILD_BENCHMARKS "Build the Google Benchmark suite" ON)
 option(ATLAS_BUILD_EXAMPLES "Build example client applications" ON)
 
+set(ATLAS_SANITIZE "" CACHE STRING "Sanitizers to enable, e.g. 'address,undefined' or 'thread' (GCC/Clang)")
+if(ATLAS_SANITIZE)
+  add_compile_options(-fsanitize=${ATLAS_SANITIZE} -fno-omit-frame-pointer -fno-sanitize-recover=all)
+  add_link_options(-fsanitize=${ATLAS_SANITIZE})
+endif()
+
 find_package(Threads REQUIRED)
 
 # ---------------------------------------------------------------------------
