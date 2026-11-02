@@ -281,3 +281,71 @@ TEST_CASE("output column names survive aggregation", "[sql]") {
     auto r = t.run("SELECT d.name, COUNT(*) AS n, MAX(e.salary) FROM dept d JOIN emp e ON e.dept_id = d.id GROUP BY d.name");
     CHECK(r.columns == std::vector<std::string>{"name", "n", "MAX(e.salary)"});
 }
+
+TEST_CASE("ORDER BY uses index order and LIMIT stops early", "[sql][planner][order]") {
+    TestDb t;
+    t.run("CREATE TABLE ev (id INT PRIMARY KEY, score INT, label TEXT)");
+    t.run("CREATE INDEX ev_score ON ev (score)");
+    t.run("BEGIN");
+    for (int i = 0; i < 500; ++i) {
+        std::string score = i % 10 == 0 ? "NULL" : std::to_string((i * 37) % 101);
+        t.run("INSERT INTO ev VALUES (" + std::to_string(i) + ", " + score + ", 'e" + std::to_string(i) + "')");
+    }
+    t.run("COMMIT");
+
+    auto plan = [&](const std::string& q) {
+        std::string s;
+        for (const auto& row : t.run("EXPLAIN " + q).rows) s += row[0].as_text() + "\n";
+        return s;
+    };
+    auto ids = [&](const std::string& q) {
+        std::vector<std::string> out;
+        for (const auto& row : t.run(q).rows) out.push_back(row[0].to_string() + "/" + row[1].to_string());
+        return out;
+    };
+    // Each optimized query must return exactly what a full sort returns ("+ 0" defeats the index).
+    struct Case {
+        std::string fast, reference;
+    };
+    std::vector<Case> cases = {
+        {"SELECT id, score FROM ev ORDER BY id DESC LIMIT 10", "SELECT id, score FROM ev ORDER BY id + 0 DESC LIMIT 10"},
+        {"SELECT id, score FROM ev ORDER BY id LIMIT 5 OFFSET 7", "SELECT id, score FROM ev ORDER BY id + 0 LIMIT 5 OFFSET 7"},
+        // Ties come out in row order, exactly like the stable sort over a table scan.
+        {"SELECT id, score FROM ev ORDER BY score", "SELECT id, score FROM ev ORDER BY score + 0"},
+        {"SELECT id, score FROM ev WHERE score >= 20 AND score < 40 ORDER BY score DESC LIMIT 7",
+         "SELECT id, score FROM ev WHERE score + 0 >= 20 AND score + 0 < 40 ORDER BY score + 0 DESC, id DESC LIMIT 7"},
+        {"SELECT id, score FROM ev WHERE label LIKE 'e1%' ORDER BY id DESC LIMIT 4",
+         "SELECT id, score FROM ev WHERE label LIKE 'e1%' ORDER BY id + 0 DESC LIMIT 4"},
+        {"SELECT id, score FROM ev ORDER BY 1 DESC LIMIT 3", "SELECT id, score FROM ev ORDER BY id + 0 DESC LIMIT 3"},
+    };
+    for (const auto& c : cases) {
+        INFO(c.fast);
+        CHECK(ids(c.fast) == ids(c.reference));
+        CHECK(plan(c.fast).find("Sort") == std::string::npos);
+    }
+
+    // NULLs sort first ascending and last descending, like a real sort.
+    auto asc = t.run("SELECT score FROM ev ORDER BY score LIMIT 3").rows;
+    CHECK(asc[0][0].is_null());
+    auto desc = t.run("SELECT score FROM ev ORDER BY score DESC").rows;
+    CHECK(desc.back()[0].is_null());
+    CHECK(desc.size() == 500);
+
+    CHECK_THAT(plan("SELECT * FROM ev ORDER BY id DESC LIMIT 10"),
+               ContainsSubstring("IndexScan ev USING ev_pkey ORDER BY id DESC LIMIT 10"));
+    // A filter after the scan prevents pushing the LIMIT into it.
+    CHECK(plan("SELECT * FROM ev WHERE label = 'x' ORDER BY id LIMIT 10").find("LIMIT 10\n") == std::string::npos);
+    // Without a usable index, the sort keeps only the top N rows.
+    CHECK_THAT(plan("SELECT * FROM ev ORDER BY label LIMIT 5"), ContainsSubstring("TopN 5"));
+    CHECK(t.run("SELECT * FROM ev ORDER BY id LIMIT 0").rows.empty());
+}
+
+TEST_CASE("top-N sort keeps ties stable", "[sql][order]") {
+    TestDb t;
+    t.run("CREATE TABLE ties (k INT, v INT)");
+    t.run("INSERT INTO ties VALUES (1, 1), (0, 2), (1, 3), (0, 4), (1, 5), (0, 6)");
+    auto r = t.run("SELECT v FROM ties ORDER BY k LIMIT 4");
+    CHECK(column(r) == std::vector<std::string>{"2", "4", "6", "1"});
+    r = t.run("SELECT v FROM ties ORDER BY k DESC LIMIT 2 OFFSET 1");
+    CHECK(column(r) == std::vector<std::string>{"3", "5"});
+}

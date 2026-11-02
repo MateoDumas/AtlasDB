@@ -76,6 +76,52 @@ public:
         return out;
     }
 
+    // Rids in key order (ascending or descending) within optional bounds, stopping
+    // after `limit` entries. With include_nulls, NULL keys are returned too, where a
+    // sort puts them: first when ascending, last when descending.
+    std::vector<RID> scan_ordered(const std::optional<IndexBound>& lo, const std::optional<IndexBound>& hi,
+                                  bool descending, size_t limit, bool include_nulls) const {
+        std::vector<RID> out;
+        if (limit == 0) return out;
+        auto below_lo = [&](const Value& v) {
+            if (!lo) return false;
+            int c = compare_values(v, lo->value);
+            return c < 0 || (c == 0 && !lo->inclusive);
+        };
+        auto above_hi = [&](const Value& v) {
+            if (!hi) return false;
+            int c = compare_values(v, hi->value);
+            return c > 0 || (c == 0 && !hi->inclusive);
+        };
+        if (!descending) {
+            auto it = lo ? tree_.lower_bound(IndexKey{lo->value, RID{0, 0}}) : tree_.begin();
+            for (; it != tree_.end() && out.size() < limit; ++it) {
+                if (it->value.is_null()) {
+                    if (include_nulls) out.push_back(it->rid);
+                    continue;
+                }
+                if (below_lo(it->value)) continue;
+                if (above_hi(it->value)) break;
+                out.push_back(it->rid);
+            }
+            return out;
+        }
+        constexpr RID MAX_RID{0xFFFFFFFFu, 0xFFFF};
+        const IndexKey* cur = !hi ? tree_.last()
+                                  : tree_.find_prev(IndexKey{hi->value, hi->inclusive ? MAX_RID : RID{0, 0}});
+        while (cur && out.size() < limit) {
+            if (cur->value.is_null()) {
+                if (!include_nulls) break;  // NULLs are the smallest keys: nothing left to return
+            } else if (below_lo(cur->value)) {
+                break;
+            }
+            out.push_back(cur->rid);
+            IndexKey key = *cur;
+            cur = tree_.find_prev(key);
+        }
+        return out;
+    }
+
     bool check_invariants() const { return tree_.check_invariants(); }
 
 private:

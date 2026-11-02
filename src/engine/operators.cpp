@@ -21,6 +21,7 @@ std::vector<RID> AccessPath::rids() const {
         }
         return out;
     }
+    if (ordered) return index->scan_ordered(lo, hi, descending, limit.value_or(SIZE_MAX), include_nulls);
     return index->range(lo, hi);
 }
 
@@ -70,7 +71,11 @@ bool IndexScanOp::next(Row& out) {
 std::string IndexScanOp::describe() const {
     std::string s = "IndexScan " + table_.name();
     if (alias_ != table_.name()) s += " AS " + alias_;
-    return s + " USING " + path_.index->def().name + " " + path_.condition;
+    s += " USING " + path_.index->def().name;
+    if (!path_.condition.empty()) s += " " + path_.condition;
+    if (path_.ordered) s += std::string(" ORDER BY ") + path_.index->def().column + (path_.descending ? " DESC" : "");
+    if (path_.limit) s += " LIMIT " + std::to_string(*path_.limit);
+    return s;
 }
 
 bool SingleRowOp::next(Row& out) {
@@ -302,16 +307,44 @@ bool DistinctOp::next(Row& out) {
 void SortOp::open() {
     child_->open();
     rows_.clear();
-    Row r;
-    while (child_->next(r)) rows_.push_back(r);
-    std::stable_sort(rows_.begin(), rows_.end(), [&](const Row& a, const Row& b) {
+    pos_ = 0;
+    auto key_less = [&](const Row& a, const Row& b) {
         for (const auto& k : keys_) {
             int c = compare_values(a[k.column], b[k.column]);
             if (c != 0) return k.desc ? c > 0 : c < 0;
         }
         return false;
-    });
-    pos_ = 0;
+    };
+    Row r;
+    if (!top_n_) {
+        while (child_->next(r)) rows_.push_back(r);
+        std::stable_sort(rows_.begin(), rows_.end(), key_less);
+        return;
+    }
+    // Top-N: keep the N smallest rows in a max-heap. The arrival number breaks
+    // ties so the result matches a stable sort.
+    size_t n = *top_n_;
+    using Entry = std::pair<Row, size_t>;
+    auto entry_less = [&](const Entry& a, const Entry& b) {
+        if (key_less(a.first, b.first)) return true;
+        if (key_less(b.first, a.first)) return false;
+        return a.second < b.second;
+    };
+    std::vector<Entry> heap;
+    heap.reserve(n);
+    for (size_t seq = 0; child_->next(r); ++seq) {
+        if (n == 0) continue;
+        if (heap.size() < n) {
+            heap.emplace_back(r, seq);
+            std::push_heap(heap.begin(), heap.end(), entry_less);
+        } else if (entry_less({r, seq}, heap.front())) {
+            std::pop_heap(heap.begin(), heap.end(), entry_less);
+            heap.back() = {r, seq};
+            std::push_heap(heap.begin(), heap.end(), entry_less);
+        }
+    }
+    std::sort_heap(heap.begin(), heap.end(), entry_less);
+    for (auto& e : heap) rows_.push_back(std::move(e.first));
 }
 
 bool SortOp::next(Row& out) {
@@ -321,7 +354,7 @@ bool SortOp::next(Row& out) {
 }
 
 std::string SortOp::describe() const {
-    std::string s = "Sort [";
+    std::string s = top_n_ ? "TopN " + std::to_string(*top_n_) + " [" : "Sort [";
     for (size_t i = 0; i < keys_.size(); ++i) s += (i ? ", " : "") + keys_[i].display + (keys_[i].desc ? " DESC" : "");
     return s + "]";
 }

@@ -171,12 +171,34 @@ std::set<size_t> sources_used(const std::vector<Source>& sources, const Expr& e)
     return out;
 }
 
+// Requested output order for a single-table query (ORDER BY one column).
+struct OrderHint {
+    int column;                    // column index in the table
+    bool desc;
+    std::optional<size_t> limit;   // LIMIT + OFFSET, if any
+    bool satisfied = false;        // set by build_scan when the scan delivers this order
+};
+
 // Scan of one source with predicates (any binding) pushed down into it.
-OpPtr build_scan(Source& src, std::vector<ExprPtr> preds) {
+OpPtr build_scan(Source& src, std::vector<ExprPtr> preds, OrderHint* hint = nullptr) {
     Scope local;
     local.add_table(src.alias, src.table->schema());
     for (auto& p : preds) bind_expr(*p, local);
     AccessPath path = choose_access_path(*src.table, preds);
+    if (hint) {
+        // Read the index in order instead of sorting: either the range scan already
+        // uses the ORDER BY column's index, or no index was chosen and one exists.
+        bool same_index = path.index && path.index->column() == hint->column && path.eq_values.empty();
+        Index* order_index = same_index ? path.index : (!path.index ? src.table->index_on(hint->column) : nullptr);
+        if (order_index) {
+            path.index = order_index;
+            path.ordered = true;
+            path.descending = hint->desc;
+            path.include_nulls = !path.lo && !path.hi;
+            if (preds.empty()) path.limit = hint->limit;  // nothing filters rows after the scan
+            hint->satisfied = true;
+        }
+    }
     OpPtr op;
     if (path.uses_index()) op = std::make_unique<IndexScanOp>(*src.table, src.alias, std::move(path));
     else op = std::make_unique<SeqScanOp>(*src.table, src.alias);
@@ -296,13 +318,45 @@ SelectPlan plan_select(Database& db, SelectStmt& s) {
         }
     }
 
+    // ---- 4a. can a single-table ORDER BY come straight from an index? ----
+    std::optional<OrderHint> order_hint;
+    bool may_aggregate = !s.group_by.empty() || s.having != nullptr;
+    for (const auto& item : items) may_aggregate = may_aggregate || contains_aggregate(*item.expr);
+    if (sources.size() == 1 && s.order_by.size() == 1 && !may_aggregate && !s.distinct) {
+        const Expr& e = *s.order_by[0].expr;
+        const Expr* col = nullptr;
+        ExprPtr bound;
+        if (e.kind == ExprKind::Literal && e.literal.type() == DataType::Integer) {
+            int64_t k = e.literal.as_int();
+            if (k >= 1 && k <= static_cast<int64_t>(items.size())) col = items[static_cast<size_t>(k - 1)].expr.get();
+        } else {
+            if (e.kind == ExprKind::Column && e.table.empty())
+                for (const auto& item : items)
+                    if (item.alias == e.name) col = item.expr.get();
+            if (!col) {
+                bound = e.clone();
+                try {
+                    bind_expr(*bound, full);
+                    col = bound.get();
+                } catch (const DbError&) {
+                    // Not a plain column (e.g. an alias of an expression): handled by the normal path.
+                }
+            }
+        }
+        if (col && col->kind == ExprKind::Column && col->slot >= 0) {
+            std::optional<size_t> limit;
+            if (s.limit) limit = static_cast<size_t>(eval_count(s.limit, "LIMIT") + (s.offset ? eval_count(s.offset, "OFFSET") : 0));
+            order_hint = OrderHint{col->slot, s.order_by[0].desc, limit};
+        }
+    }
+
     // ---- 4. scans and joins (left-deep, in FROM order) ----
     OpPtr op;
     if (sources.empty()) {
         op = std::make_unique<SingleRowOp>();
         if (ExprPtr f = join_conjuncts(std::move(step_preds[0]))) op = std::make_unique<FilterOp>(std::move(op), std::move(f));
     } else {
-        op = build_scan(sources[0], std::move(step_preds[0]));
+        op = build_scan(sources[0], std::move(step_preds[0]), order_hint ? &*order_hint : nullptr);
         Scope prefix;
         prefix.add_table(sources[0].alias, sources[0].table->schema());
         for (size_t k = 1; k < sources.size(); ++k) {
@@ -465,13 +519,17 @@ SelectPlan plan_select(Database& db, SelectStmt& s) {
 
     op = std::make_unique<ProjectOp>(std::move(op), std::move(proj));
     if (s.distinct) op = std::make_unique<DistinctOp>(std::move(op));
-    if (!keys.empty()) op = std::make_unique<SortOp>(std::move(op), std::move(keys));
-    if (s.limit || s.offset) {
-        std::optional<int64_t> limit;
-        if (s.limit) limit = eval_count(s.limit, "LIMIT");
-        int64_t offset = s.offset ? eval_count(s.offset, "OFFSET") : 0;
-        op = std::make_unique<LimitOp>(std::move(op), limit, offset);
+    std::optional<int64_t> limit;
+    int64_t offset = 0;
+    if (s.limit) limit = eval_count(s.limit, "LIMIT");
+    if (s.offset) offset = eval_count(s.offset, "OFFSET");
+    bool sorted_by_scan = order_hint && order_hint->satisfied;
+    if (!keys.empty() && !sorted_by_scan) {
+        std::optional<size_t> top_n;
+        if (limit) top_n = static_cast<size_t>(*limit + offset);
+        op = std::make_unique<SortOp>(std::move(op), std::move(keys), top_n);
     }
+    if (s.limit || s.offset) op = std::make_unique<LimitOp>(std::move(op), limit, offset);
     // Hidden sort keys were appended after the visible columns; strip them.
     {
         size_t total_hidden = 0;

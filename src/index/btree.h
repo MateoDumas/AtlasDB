@@ -173,6 +173,37 @@ public:
         return Iterator(this, n, i);
     }
 
+    // Largest key in the tree, or nullptr when empty.
+    const Key* last() const {
+        const Node* n = node(root_);
+        while (!n->leaf) n = node(n->children.back());
+        return n->keys.empty() ? nullptr : &n->keys.back();
+    }
+
+    // Largest key strictly less than `key`, or nullptr. Used for descending
+    // scans; leaves are only linked forward, so this walks down from the root.
+    const Key* find_prev(const Key& key) const {
+        std::vector<std::pair<const Node*, size_t>> path;
+        const Node* n = node(root_);
+        while (!n->leaf) {
+            size_t i = child_index(n, key);
+            path.emplace_back(n, i);
+            n = node(n->children[i]);
+        }
+        size_t pos = std::lower_bound(n->keys.begin(), n->keys.end(), key, cmp_) - n->keys.begin();
+        if (pos > 0) return &n->keys[pos - 1];
+        // Everything in this leaf is >= key: back up to the nearest left sibling subtree.
+        while (!path.empty()) {
+            auto [parent, i] = path.back();
+            path.pop_back();
+            if (i == 0) continue;
+            const Node* m = node(parent->children[i - 1]);
+            while (!m->leaf) m = node(m->children.back());
+            return m->keys.empty() ? nullptr : &m->keys.back();
+        }
+        return nullptr;
+    }
+
     // Height of the tree (1 = a single leaf). Exposed for tests/diagnostics.
     size_t height() const {
         size_t h = 1;

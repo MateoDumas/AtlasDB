@@ -18,6 +18,12 @@ struct AccessPath {
     std::optional<IndexBound> lo, hi;
     std::string condition;         // human readable, for EXPLAIN
 
+    // Ordered scans deliver rows in index order, so the plan needs no Sort.
+    bool ordered = false;
+    bool descending = false;
+    bool include_nulls = false;      // unbounded ordered scans return NULL keys too
+    std::optional<size_t> limit;     // stop early (only when nothing filters the rows)
+
     bool uses_index() const { return index != nullptr; }
     std::vector<RID> rids() const;
 };
@@ -202,7 +208,9 @@ struct SortKey {
 
 class SortOp : public Operator {
 public:
-    SortOp(OpPtr child, std::vector<SortKey> keys) : child_(std::move(child)), keys_(std::move(keys)) {}
+    // With top_n, only the first N rows of the sorted output are kept (heap of size N).
+    SortOp(OpPtr child, std::vector<SortKey> keys, std::optional<size_t> top_n = std::nullopt)
+        : child_(std::move(child)), keys_(std::move(keys)), top_n_(top_n) {}
     void open() override;
     bool next(Row& out) override;
     std::string describe() const override;
@@ -211,6 +219,7 @@ public:
 private:
     OpPtr child_;
     std::vector<SortKey> keys_;
+    std::optional<size_t> top_n_;
     std::vector<Row> rows_;
     size_t pos_ = 0;
 };

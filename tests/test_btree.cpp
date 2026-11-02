@@ -87,3 +87,37 @@ TEST_CASE("Index supports duplicates, lookups and ranges", "[btree][index]") {
     CHECK(idx.lookup(Value::integer(42)).size() == 9);
     CHECK(idx.find_other(Value::integer(42), RID{142, 0}).has_value());
 }
+
+TEST_CASE("B+tree reverse navigation", "[btree]") {
+    for (size_t order : {3u, 4u, 16u}) {
+        BPlusTree<int> t(order);
+        CHECK(t.last() == nullptr);
+        std::set<int> ref;
+        std::mt19937 rng(static_cast<unsigned>(order));
+        for (int i = 0; i < 3000; ++i) {
+            int k = static_cast<int>(rng() % 5000);
+            t.insert(k);
+            ref.insert(k);
+            if (i % 3 == 0) {
+                int d = static_cast<int>(rng() % 5000);
+                t.erase(d);
+                ref.erase(d);
+            }
+        }
+        REQUIRE(*t.last() == *ref.rbegin());
+        for (int probe = -1; probe <= 5001; probe += 7) {
+            auto it = ref.lower_bound(probe);
+            const int* p = t.find_prev(probe);
+            if (it == ref.begin()) {
+                CHECK(p == nullptr);
+            } else {
+                REQUIRE(p != nullptr);
+                CHECK(*p == *std::prev(it));
+            }
+        }
+        // Walk the whole tree backwards.
+        std::vector<int> back;
+        for (const int* p = t.last(); p; p = t.find_prev(*p)) back.push_back(*p);
+        CHECK(std::equal(back.begin(), back.end(), ref.rbegin(), ref.rend()));
+    }
+}

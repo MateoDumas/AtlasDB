@@ -229,3 +229,18 @@ void BM_RebuildIndexFromTable(benchmark::State& state) {
 BENCHMARK(BM_RebuildIndexFromTable)->Unit(benchmark::kMillisecond);
 
 }  // namespace
+
+namespace {
+
+void BM_OrderByLimit(benchmark::State& state) {
+    BenchDb b;
+    b.load_users(100'000);
+    // range(0): 0 = indexed column (reads 10 rows), 1 = unindexed column (top-N over all rows)
+    std::string sql = state.range(0) == 0 ? "SELECT id, name FROM users ORDER BY id DESC LIMIT 10"
+                                          : "SELECT id, name FROM users ORDER BY name DESC LIMIT 10";
+    for (auto _ : state) benchmark::DoNotOptimize(b.session->execute(sql));
+    state.SetLabel(state.range(0) == 0 ? "index order" : "top-N sort");
+}
+BENCHMARK(BM_OrderByLimit)->Arg(0)->Arg(1)->Unit(benchmark::kMicrosecond);
+
+}  // namespace
