@@ -39,6 +39,7 @@ public:
     void persist() { tree_.store().persist(tree_.root(), tree_.size()); }
     Pager& pager() { return tree_.store().pager(); }
     size_t loaded_nodes() { return tree_.store().loaded_nodes(); }
+    size_t evict_nodes(size_t capacity) { return tree_.store().evict(capacity); }
 
     // Returns the rid of some entry with value v other than `self`, if any.
     std::optional<RID> find_other(const Value& v, std::optional<RID> self = std::nullopt) const {

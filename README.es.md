@@ -262,8 +262,8 @@ líneas de Python sin dependencias.
   corren junto con las lecturas. No hay MVCC ni locks por fila. El timeout de transacciones
   inactivas sólo existe en el servidor: con la API embebida, una `Session` con una transacción
   abierta bloquea a las demás hasta que termine.
-- Los nodos de índice que se cargan quedan en memoria (no hay desalojo de nodos limpios), así
-  que un índice que se recorre entero termina ocupando RAM proporcional a su tamaño.
+- Los nodos de índice modificados no se pueden desalojar hasta el siguiente checkpoint, así que
+  una transacción que toca muchísimas claves usa memoria proporcional a esos cambios.
 - Índices, claves primarias y foráneas de una sola columna. No hay `ALTER TABLE`, subconsultas,
   `UNION` ni vistas.
 - Política no-steal: una transacción enorme mantiene todas sus páginas sucias en memoria.

@@ -229,7 +229,12 @@ QueryResult Session::execute_statement(Statement& stmt) {
             },
             stmt.node);
         uint64_t lsn = autocommit && is_dml(stmt) ? db_.commit(*txn) : 0;
+        // Between statements nobody holds index node pointers, so cold nodes can go.
+        // The budget is checked while a lock still protects the catalog.
+        bool over_budget = db_.index_cache_over_budget();
+        if (!shared && over_budget) db_.evict_index_nodes();
         release();
+        if (shared && over_budget) db_.try_evict_index_nodes(id_);
         db_.wait_durable(std::max(lsn, visible_lsn));  // group commit: fsync after releasing the lock
         return result;
     } catch (...) {

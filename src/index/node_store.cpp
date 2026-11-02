@@ -1,5 +1,6 @@
 #include "index/node_store.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "common/bytes.h"
@@ -99,11 +100,32 @@ std::unique_ptr<IndexNodeStore::Node> IndexNodeStore::load(uint32_t id) const {
 IndexNodeStore::Node* IndexNodeStore::get(uint32_t id) const {
     std::lock_guard lk(mutex_);
     auto it = nodes_.find(id);
-    if (it != nodes_.end()) return it->second.get();
+    if (it != nodes_.end()) {
+        it->second->last_used = ++clock_;
+        return it->second.get();
+    }
     auto n = load(id);
+    n->last_used = ++clock_;
     Node* raw = n.get();
     nodes_.emplace(id, std::move(n));
+    loaded_ = nodes_.size();
     return raw;
+}
+
+size_t IndexNodeStore::evict(size_t capacity) {
+    std::lock_guard lk(mutex_);
+    if (nodes_.size() <= capacity) return 0;
+    std::vector<std::pair<uint64_t, uint32_t>> clean;  // (last_used, id)
+    for (const auto& [id, n] : nodes_)
+        if (!n->dirty) clean.emplace_back(n->last_used, id);
+    // Evict down to 3/4 of the budget so this does not run after every statement.
+    size_t target = capacity - capacity / 4;
+    size_t excess = nodes_.size() > target ? nodes_.size() - target : 0;
+    excess = std::min(excess, clean.size());
+    std::partial_sort(clean.begin(), clean.begin() + static_cast<std::ptrdiff_t>(excess), clean.end());
+    for (size_t i = 0; i < excess; ++i) nodes_.erase(clean[i].second);
+    loaded_ = nodes_.size();
+    return excess;
 }
 
 uint32_t IndexNodeStore::allocate_page() {
@@ -121,7 +143,9 @@ uint32_t IndexNodeStore::create(bool leaf) {
     auto n = std::make_unique<Node>();
     n->leaf = leaf;
     n->pages = {id};
+    n->last_used = ++clock_;
     nodes_.emplace(id, std::move(n));
+    loaded_ = nodes_.size();
     return id;
 }
 
@@ -131,21 +155,18 @@ void IndexNodeStore::destroy(uint32_t id) {
     if (it == nodes_.end()) return;
     for (uint32_t p : it->second->pages) free_pages_.push_back(p);
     nodes_.erase(it);
+    loaded_ = nodes_.size();
 }
 
 void IndexNodeStore::clear() {
     std::lock_guard lk(mutex_);
     nodes_.clear();
+    loaded_ = 0;
     free_pages_.clear();
     pager_.reset();
     pager_.allocate();  // header page
     meta_root_ = 0;
     meta_size_ = 0;
-}
-
-size_t IndexNodeStore::loaded_nodes() const {
-    std::lock_guard lk(mutex_);
-    return nodes_.size();
 }
 
 void IndexNodeStore::write_record(uint32_t page, const std::string& rec) {

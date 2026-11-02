@@ -22,6 +22,7 @@ struct BTreeNode {
     uint32_t next = 0;               // leaves: id of the right sibling
     bool dirty = true;               // modified since it was last persisted
     std::vector<uint32_t> pages;     // paged stores: pages holding the serialized node
+    uint64_t last_used = 0;          // paged stores: access stamp for eviction
 };
 
 // Node store that simply keeps every node in memory.

@@ -26,6 +26,7 @@ namespace atlas {
 
 struct DatabaseOptions {
     size_t cache_pages_per_table = 2048;            // 8 MiB of clean pages per table
+    size_t index_cache_nodes = 8192;                // decoded B+tree nodes kept per index
     uint64_t checkpoint_wal_bytes = 8ull << 20;     // checkpoint when the WAL grows past this
     bool sync_commits = true;                       // fsync the WAL on every commit
     std::chrono::milliseconds lock_timeout{5000};   // wait for the transaction lock
@@ -125,6 +126,15 @@ public:
     uint64_t wal_syncs() const { return wal_syncs_.load(); }
     void rollback(Transaction& txn, Transaction::Savepoint to = {0, 0});
     void checkpoint();
+
+    // Index node cache: true when some index holds more nodes than its budget.
+    bool index_cache_over_budget();
+    // Evicts cold index nodes. The caller must hold the exclusive lock (so no
+    // reader holds node pointers).
+    void evict_index_nodes();
+    // From a session that holds no lock (after a read found the cache over
+    // budget): evicts only if the exclusive lock is free right now, never waiting.
+    void try_evict_index_nodes(uint64_t session_id);
 
     // ---- row operations: enforce constraints, maintain indexes, log ----
     RID insert_row(Transaction& txn, Table& t, Row row);

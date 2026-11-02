@@ -35,8 +35,9 @@ ERROR (constraint_violation): foreign key violation: books.author_id = 99 has no
 
 - **Storage engine**: 4 KiB slotted pages with CRC32 checksums, an LRU buffer pool, heap files
   with a lazily built free-space map, and overflow chains for rows larger than a page (up to 16 MiB).
-- **Persistent B+tree indexes**: one file per index; nodes are loaded on first use, so opening a
-  100k-row database takes ~18 ms instead of rebuilding indexes from the table.
+- **Persistent B+tree indexes**: one file per index; nodes are loaded on first use and cold ones
+  are evicted (LRU, per-index budget), so opening a 100k-row database takes ~18 ms instead of
+  rebuilding indexes from the table, and memory stays bounded.
 - **Crash safety**: redo-only WAL with **group commit** (concurrent commits share one `fsync`), page LSNs, and **atomic checkpoints
   through a doublewrite buffer** that repairs pages torn by a crash mid-checkpoint.
 - **Transactions**: serializable via a database-wide reader/writer lock (readers run in
@@ -195,7 +196,6 @@ pipelined (`Prepare` and `Execute` sent together) for a single round trip. Full 
 
 - One writer at a time (readers run in parallel). Next step: MVCC.
 - Single-column indexes and keys; no subqueries, `UNION`, `ALTER TABLE` or views yet.
-- Loaded index nodes stay in memory (no eviction of clean nodes yet).
 - Planned: hash joins, cost-based planning with statistics, authentication and TLS for the server.
 
 ## License

@@ -458,3 +458,37 @@ TEST_CASE("random workload with large rows survives crashes", "[recovery][overfl
         check_indexes_match_table(t);
     }
 }
+
+TEST_CASE("cold index nodes are evicted to stay within the budget", "[index][evict]") {
+    DatabaseOptions opts;
+    opts.index_cache_nodes = 12;
+    TestDb t(opts);
+    t.run("CREATE TABLE e (id INT PRIMARY KEY, grp INT)");
+    t.run("CREATE INDEX e_grp ON e (grp)");
+    t.run("BEGIN");
+    for (int i = 0; i < 6000; ++i) t.run("INSERT INTO e VALUES (" + std::to_string(i) + ", " + std::to_string(i % 13) + ")");
+    t.run("COMMIT");
+    t.run("CHECKPOINT");  // persists every node, so all of them become evictable
+    Index* pk = t.db->table("e").find_index("e_pkey");
+    REQUIRE(pk);
+    CHECK(pk->loaded_nodes() <= 12);
+
+    // Point lookups all over the key space: nodes get loaded and evicted again.
+    std::mt19937 rng(5);
+    for (int q = 0; q < 300; ++q) {
+        int id = static_cast<int>(rng() % 6000);
+        REQUIRE(t.scalar("SELECT grp FROM e WHERE id = " + std::to_string(id)).as_int() == id % 13);
+        REQUIRE(pk->loaded_nodes() <= 12 + 4);  // at most one root-to-leaf path above the budget
+    }
+    // Writes mixed with evictions keep the tree consistent.
+    for (int i = 0; i < 6000; i += 7) t.run("DELETE FROM e WHERE id = " + std::to_string(i));
+    t.run("UPDATE e SET grp = grp + 100 WHERE id % 5 = 0");
+    t.run("CHECKPOINT");
+    CHECK(pk->loaded_nodes() <= 12);
+    CHECK(pk->check_invariants());
+    CHECK(t.count("e WHERE id >= 0") == t.count("e WHERE id + 0 >= 0"));
+    CHECK(t.count("e WHERE grp = 105") == t.count("e WHERE grp + 0 = 105"));
+    t.crash_and_recover();
+    CHECK(t.count("e WHERE id >= 0") == 6000 - 858);
+    check_indexes_match_table(t);
+}

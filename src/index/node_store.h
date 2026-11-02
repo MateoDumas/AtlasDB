@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -59,7 +60,13 @@ public:
     // Serializes dirty nodes, the free list and the header into pages.
     void persist(uint32_t root, uint64_t size);
     Pager& pager() { return pager_; }
-    size_t loaded_nodes() const;
+    size_t loaded_nodes() const { return loaded_.load(); }
+
+    // Drops least recently used clean nodes until at most `capacity` remain.
+    // Callers must guarantee no Node* is held anywhere (the database calls this
+    // between statements, under the exclusive lock). Dirty nodes stay until the
+    // next checkpoint persists them. Returns the number of nodes evicted.
+    size_t evict(size_t capacity);
 
 private:
     uint32_t allocate_page();
@@ -69,6 +76,8 @@ private:
     mutable std::mutex mutex_;
     mutable Pager pager_;
     mutable std::unordered_map<uint32_t, std::unique_ptr<Node>> nodes_;
+    mutable std::atomic<size_t> loaded_{0};
+    mutable uint64_t clock_ = 0;
     std::vector<uint32_t> free_pages_;
     uint32_t meta_root_ = 0;
     uint64_t meta_size_ = 0;

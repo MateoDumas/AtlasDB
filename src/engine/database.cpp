@@ -573,6 +573,25 @@ void Database::checkpoint() {
     std::filesystem::remove(dir_ / DOUBLEWRITE_FILE, ec);
     for (const auto& path : dropped_files_) std::filesystem::remove(path, ec);
     dropped_files_.clear();
+    evict_index_nodes();  // every node is clean now
+}
+
+bool Database::index_cache_over_budget() {
+    for (auto& [name, t] : tables_)
+        for (const auto& idx : t->indexes())
+            if (idx->loaded_nodes() > options_.index_cache_nodes) return true;
+    return false;
+}
+
+void Database::evict_index_nodes() {
+    for (auto& [name, t] : tables_)
+        for (const auto& idx : t->indexes()) idx->evict_nodes(options_.index_cache_nodes);
+}
+
+void Database::try_evict_index_nodes(uint64_t session_id) {
+    if (!lock_.acquire(session_id, std::chrono::milliseconds(0))) return;
+    evict_index_nodes();
+    lock_.release(session_id);
 }
 
 void Database::maybe_checkpoint() {
