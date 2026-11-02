@@ -177,7 +177,8 @@ QueryResult decode_rowset(std::string_view body) {
         }
         uint64_t nrows = r.u64();
         // Every value takes at least one byte, which bounds a hostile row count.
-        if (ncols > 0 && nrows > r.remaining() / ncols) bad("row count exceeds message size");
+        // A result set without columns cannot have rows at all.
+        if (ncols == 0 ? nrows > 0 : nrows > r.remaining() / ncols) bad("row count exceeds message size");
         res.rows.reserve(static_cast<size_t>(nrows));
         for (uint64_t i = 0; i < nrows; ++i) {
             Row row;
