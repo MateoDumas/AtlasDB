@@ -212,8 +212,7 @@ Socket Listener::accept() {
 }
 
 void Listener::close() {
-    if (valid_) {
-        valid_ = false;
+    if (valid_.exchange(false)) {
 #ifdef _WIN32
         ::closesocket(static_cast<SOCKET>(fd_));
 #else

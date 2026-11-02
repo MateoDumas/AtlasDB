@@ -22,7 +22,10 @@ void Server::stop() {
     std::list<std::unique_ptr<Connection>> conns;
     {
         std::lock_guard lk(mutex_);
-        for (auto& c : connections_) c->socket.shutdown();
+        for (auto& c : connections_) {
+            std::lock_guard close_lk(c->close_mutex);
+            c->socket.shutdown();
+        }
         conns.swap(connections_);
     }
     for (auto& c : conns)
@@ -171,6 +174,7 @@ void Server::serve(Connection& conn) {
     } catch (...) {
         // Connection-level failure (peer vanished, protocol violation): just drop it.
     }
+    std::lock_guard close_lk(conn.close_mutex);
     sock.close();
 }
 

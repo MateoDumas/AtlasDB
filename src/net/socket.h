@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -58,7 +59,7 @@ public:
 
 private:
     socket_t fd_ = 0;
-    bool valid_ = false;
+    std::atomic<bool> valid_{false};  // close() runs on another thread than accept()
     uint16_t port_ = 0;
 };
 

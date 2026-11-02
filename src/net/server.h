@@ -43,6 +43,7 @@ public:
 private:
     struct Connection {
         net::Socket socket;
+        std::mutex close_mutex;  // serializes stop()'s shutdown with the handler's close
         std::thread thread;
         std::atomic<bool> finished{false};
     };
