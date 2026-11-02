@@ -9,7 +9,7 @@ namespace {
 constexpr uint32_t MAX_RECORD_BODY = 64u * 1024 * 1024;
 }
 
-Wal::Wal(std::filesystem::path path) : file_(File::open(path)) { size_ = file_.size(); }
+Wal::Wal(std::filesystem::path path) : file_(File::open(path)), sync_file_(File::open(path)) { size_ = file_.size(); }
 
 void Wal::append(const std::vector<LogRecord>& records, bool sync) {
     ByteWriter out;

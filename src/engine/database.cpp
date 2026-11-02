@@ -438,7 +438,16 @@ void Database::checkpoint() {
 
     for (auto& [file, pager] : pagers) pager->flush();
     write_file_atomic(dir_ / "catalog.bin", catalog);
-    wal_->reset();
+    {
+        // Never truncate the WAL under a group-commit fsync. Every change is now in
+        // the fsynced data files, so all commits written so far are durable.
+        std::unique_lock lk(sync_mutex_);
+        sync_cv_.wait(lk, [&] { return !sync_in_progress_; });
+        wal_->reset();
+        durable_lsn_ = std::max(durable_lsn_, last_lsn_);
+        written_lsn_ = std::max(written_lsn_.load(), last_lsn_);
+        sync_cv_.notify_all();
+    }
     std::error_code ec;
     std::filesystem::remove(dir_ / DOUBLEWRITE_FILE, ec);
     for (const auto& path : dropped_files_) std::filesystem::remove(path, ec);
@@ -511,7 +520,10 @@ void Database::log_ddl(LogRecord rec) {
     commit.type = LogType::Commit;
     commit.lsn = ++last_lsn_;
     commit.txn_id = txn;
-    wal_->append({rec, commit}, options_.sync_commits);
+    check_wal_healthy();
+    wal_->append({rec, commit}, /*sync=*/false);
+    publish_commit(commit.lsn);
+    wait_durable(commit.lsn);  // DDL is rare: just wait while holding the lock
     maybe_checkpoint();
 }
 
@@ -712,11 +724,48 @@ std::unique_ptr<Transaction> Database::begin(bool explicit_txn) {
     return txn;
 }
 
-void Database::commit(Transaction& txn) {
+void Database::check_wal_healthy() const {
+    if (wal_failed_)
+        throw DbError(ErrorCode::IO, "a WAL fsync failed earlier; restart the database to recover safely");
+}
+
+void Database::wait_durable(uint64_t lsn) {
+    if (lsn == 0) return;
+    std::unique_lock lk(sync_mutex_);
+    while (durable_lsn_ < lsn) {
+        check_wal_healthy();
+        if (sync_in_progress_) {
+            sync_cv_.wait(lk);
+            continue;
+        }
+        // Become the leader: one fsync covers every commit written so far.
+        sync_in_progress_ = true;
+        uint64_t target = written_lsn_.load();
+        lk.unlock();
+        bool ok = true;
+        try {
+            wal_->sync();
+        } catch (...) {
+            ok = false;
+        }
+        lk.lock();
+        sync_in_progress_ = false;
+        if (ok) {
+            durable_lsn_ = std::max(durable_lsn_, target);
+            ++wal_syncs_;
+        } else {
+            wal_failed_ = true;
+        }
+        sync_cv_.notify_all();
+    }
+}
+
+uint64_t Database::commit(Transaction& txn) {
     if (txn.redo.empty()) {
         txn.undo.clear();
-        return;
+        return 0;
     }
+    check_wal_healthy();
     uint64_t first_lsn = last_lsn_;
     for (auto& rec : txn.redo) {
         rec.lsn = ++last_lsn_;
@@ -728,7 +777,7 @@ void Database::commit(Transaction& txn) {
     commit_rec.txn_id = txn.id;
     txn.redo.push_back(commit_rec);
     try {
-        wal_->append(txn.redo, options_.sync_commits);
+        wal_->append(txn.redo, /*sync=*/false);
     } catch (...) {
         last_lsn_ = first_lsn;
         txn.redo.pop_back();
@@ -742,7 +791,19 @@ void Database::commit(Transaction& txn) {
     }
     txn.undo.clear();
     txn.redo.clear();
+    publish_commit(commit_rec.lsn);
     maybe_checkpoint();
+    return commit_rec.lsn;
+}
+
+// Makes a commit written to the WAL visible to wait_durable().
+void Database::publish_commit(uint64_t lsn) {
+    written_lsn_ = lsn;
+    if (!options_.sync_commits) {
+        // No fsync at all: "durable" as soon as it is written.
+        std::lock_guard lk(sync_mutex_);
+        durable_lsn_ = std::max(durable_lsn_, lsn);
+    }
 }
 
 void Database::rollback(Transaction& txn, Transaction::Savepoint to) {

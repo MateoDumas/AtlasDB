@@ -5,6 +5,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <thread>
 
 #include "engine/database.h"
 #include "engine/session.h"
@@ -97,7 +98,7 @@ void BM_InsertAutocommit(benchmark::State& state) {
     state.SetItemsProcessed(state.iterations());
     state.SetLabel(state.range(0) ? "fsync per commit" : "no fsync");
 }
-BENCHMARK(BM_InsertAutocommit)->Arg(0)->Arg(1)->Iterations(2000);
+BENCHMARK(BM_InsertAutocommit)->Arg(0)->Arg(1)->Iterations(2000)->UseRealTime();
 
 void BM_InsertInTransaction(benchmark::State& state) {
     for (auto _ : state) {
@@ -242,5 +243,34 @@ void BM_OrderByLimit(benchmark::State& state) {
     state.SetLabel(state.range(0) == 0 ? "index order" : "top-N sort");
 }
 BENCHMARK(BM_OrderByLimit)->Arg(0)->Arg(1)->Unit(benchmark::kMicrosecond);
+
+}  // namespace
+
+namespace {
+
+// Durable (fsync) autocommit inserts from N concurrent sessions: group commit
+// lets them share fsyncs, so throughput grows with the number of clients.
+void BM_GroupCommit(benchmark::State& state) {
+    BenchDb b(/*sync=*/true);
+    b.run("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
+    const int threads = static_cast<int>(state.range(0));
+    constexpr int per_thread = 200;
+    std::atomic<int64_t> next_id{0};
+    for (auto _ : state) {
+        std::vector<std::thread> pool;
+        for (int i = 0; i < threads; ++i) {
+            pool.emplace_back([&] {
+                Session s(*b.db);
+                for (int k = 0; k < per_thread; ++k)
+                    s.execute("INSERT INTO t VALUES (" + std::to_string(next_id++) + ", 'value')");
+            });
+        }
+        for (auto& th : pool) th.join();
+    }
+    state.SetItemsProcessed(state.iterations() * threads * per_thread);
+    state.counters["fsyncs_per_commit"] =
+        static_cast<double>(b.db->wal_syncs()) / static_cast<double>(state.iterations() * threads * per_thread);
+}
+BENCHMARK(BM_GroupCommit)->Arg(1)->Arg(4)->Arg(16)->Unit(benchmark::kMillisecond)->UseRealTime()->Iterations(3);
 
 }  // namespace

@@ -37,7 +37,7 @@ ERROR (constraint_violation): foreign key violation: books.author_id = 99 has no
   with a lazily built free-space map.
 - **Persistent B+tree indexes**: one file per index; nodes are loaded on first use, so opening a
   100k-row database takes ~18 ms instead of rebuilding indexes from the table.
-- **Crash safety**: redo-only WAL with per-commit `fsync`, page LSNs, and **atomic checkpoints
+- **Crash safety**: redo-only WAL with **group commit** (concurrent commits share one `fsync`), page LSNs, and **atomic checkpoints
   through a doublewrite buffer** that repairs pages torn by a crash mid-checkpoint.
 - **Transactions**: serializable via a database-wide reader/writer lock (readers run in
   parallel, writers are not starved), statement-level atomicity inside `BEGIN … COMMIT`.
@@ -152,7 +152,9 @@ directly with `atlas::Database::open(dir)` and `atlas::Session`.
 
 1. **No-steal + redo-only WAL.** Dirty pages stay in memory until a checkpoint, which only runs
    when no transaction is active, so uncommitted data never reaches the data files. A commit
-   appends its redo records plus a `Commit` record to `wal.log` and `fsync`s once.
+   appends its redo records plus a `Commit` record to `wal.log`, **releases the lock, then waits
+   for durability**: the first waiter fsyncs on behalf of every commit written so far (group
+   commit), and reads only return results once the commits they observed are durable.
 2. **Atomic checkpoints.** Dirty index nodes are serialized into pages. Every dirty page plus the
    new catalog goes first to `doublewrite.buf` (with a CRC) and is `fsync`ed. Only then are pages
    written in place, the catalog replaced and the WAL truncated.
@@ -181,7 +183,9 @@ pipelined (`Prepare` and `Execute` sent together) for a single round trip. Full 
 | Primary-key lookup, 100k rows (SQL text / prepared statement) | ~11 µs / ~7.5 µs |
 | Same lookup on a non-indexed column, 10k rows (full scan) | ~3.3 ms |
 | 10,000 inserts in one transaction | ~60 ms |
-| Autocommit inserts without / with `fsync` per commit | ~128k/s / ~8k/s |
+| Durable autocommit inserts (`fsync`), 1 / 4 / 16 concurrent clients | ~580 / ~1,250 / ~3,860 per second (group commit) |
+| Autocommit inserts without `fsync` (`--no-sync`) | ~64k/s |
+| `ORDER BY id DESC LIMIT 10` over 100k rows (index order) | ~37 µs |
 | `GROUP BY` over 100k rows | ~52 ms |
 | Index join 20k × 10k rows + `GROUP BY` | ~33 ms |
 | Open a 100k-row database with 2 indexes and run the first query | ~18 ms |
@@ -193,8 +197,7 @@ pipelined (`Prepare` and `Execute` sent together) for a single round trip. Full 
 - Single-column indexes and keys; no subqueries, `UNION`, `ALTER TABLE` or views yet.
 - A row must fit in one page (~4 KB); no overflow pages yet.
 - Loaded index nodes stay in memory (no eviction of clean nodes yet).
-- Planned: group commit, hash joins, cost-based planning with statistics, top-N sort,
-  authentication and TLS for the server.
+- Planned: hash joins, cost-based planning with statistics, authentication and TLS for the server.
 
 ## License
 

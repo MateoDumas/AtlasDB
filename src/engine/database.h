@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -101,7 +103,16 @@ public:
     // ---- transactions ----
     TransactionLock& lock() { return lock_; }
     std::unique_ptr<Transaction> begin(bool explicit_txn);
-    void commit(Transaction& txn);
+    // Writes the transaction to the WAL and returns its commit LSN (0 if it
+    // changed nothing). The commit is not yet durable: call wait_durable()
+    // after releasing the lock, which lets concurrent commits share one fsync.
+    uint64_t commit(Transaction& txn);
+    // Blocks until the WAL is fsynced up to `lsn` (group commit). The first
+    // waiter fsyncs on behalf of everyone; the others just wait for it.
+    void wait_durable(uint64_t lsn);
+    // LSN of the last commit written to the WAL (possibly not yet durable).
+    uint64_t written_lsn() const { return written_lsn_.load(); }
+    uint64_t wal_syncs() const { return wal_syncs_.load(); }
     void rollback(Transaction& txn, Transaction::Savepoint to = {0, 0});
     void checkpoint();
 
@@ -133,6 +144,8 @@ private:
     void remove_table(const std::string& name);
     void remove_orphan_files();
     void log_ddl(LogRecord rec);
+    void check_wal_healthy() const;
+    void publish_commit(uint64_t lsn);
     void maybe_checkpoint();
 
     Row validate_row(Table& t, Row row);
@@ -157,6 +170,15 @@ private:
     bool opened_ = false;
     TransactionLock lock_;
     std::mutex txn_id_mutex_;
+
+    // Group commit state.
+    std::mutex sync_mutex_;
+    std::condition_variable sync_cv_;
+    bool sync_in_progress_ = false;
+    uint64_t durable_lsn_ = 0;               // guarded by sync_mutex_
+    std::atomic<uint64_t> written_lsn_{0};
+    std::atomic<uint64_t> wal_syncs_{0};
+    std::atomic<bool> wal_failed_{false};    // an fsync failed: refuse further writes
 };
 
 }  // namespace atlas

@@ -118,20 +118,32 @@ QueryResult Session::execute_statement(Statement& stmt) {
     // ---- transaction control ----
     if (std::holds_alternative<BeginStmt>(stmt.node)) {
         if (txn_) throw DbError(ErrorCode::Transaction, "a transaction is already in progress");
+        // Never let a transaction read commits whose fsync is still pending. Wait
+        // before taking the lock (so others can keep going), then re-check under it;
+        // the second wait is almost always a no-op.
+        db_.wait_durable(db_.written_lsn());
         acquire_lock();
+        try {
+            db_.wait_durable(db_.written_lsn());
+        } catch (...) {
+            release_lock();
+            throw;
+        }
         txn_ = db_.begin(true);
         return command("BEGIN");
     }
     if (std::holds_alternative<CommitStmt>(stmt.node)) {
         if (!txn_) throw DbError(ErrorCode::Transaction, "no transaction in progress");
         std::unique_ptr<Transaction> txn = std::move(txn_);
+        uint64_t lsn = 0;
         try {
-            db_.commit(*txn);
+            lsn = db_.commit(*txn);
         } catch (...) {
             release_lock();
             throw;
         }
-        release_lock();
+        release_lock();          // let the next transaction run while we wait for fsync
+        db_.wait_durable(lsn);   // group commit
         return command("COMMIT");
     }
     if (std::holds_alternative<RollbackStmt>(stmt.node)) {
@@ -192,6 +204,10 @@ QueryResult Session::execute_statement(Statement& stmt) {
     };
     if (shared) acquire_shared_lock();
     else if (autocommit) acquire_lock();
+    // Commits this statement can observe. Their fsync may still be in flight, so
+    // the result is only returned once they are durable -- waiting happens after
+    // the lock is released, so other sessions keep committing meanwhile.
+    uint64_t visible_lsn = db_.written_lsn();
     std::unique_ptr<Transaction> local;
     Transaction* txn = txn_.get();
     if (autocommit) {
@@ -212,8 +228,9 @@ QueryResult Session::execute_statement(Statement& stmt) {
                 [&](auto&) -> QueryResult { throw DbError(ErrorCode::Internal, "unexpected statement"); },
             },
             stmt.node);
-        if (autocommit && is_dml(stmt)) db_.commit(*txn);
+        uint64_t lsn = autocommit && is_dml(stmt) ? db_.commit(*txn) : 0;
         release();
+        db_.wait_durable(std::max(lsn, visible_lsn));  // group commit: fsync after releasing the lock
         return result;
     } catch (...) {
         try {

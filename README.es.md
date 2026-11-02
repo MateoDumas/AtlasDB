@@ -176,7 +176,9 @@ mis_datos/
 - **WAL redo-only + no-steal**: las páginas modificadas no se escriben al archivo de datos hasta
   un checkpoint, que sólo ocurre sin transacciones activas. Por eso nunca hay datos sin
   confirmar en disco y la recuperación sólo necesita rehacer. Cada `COMMIT` escribe su lote de
-  registros más un registro `Commit` y hace `fsync`.
+  registros más un registro `Commit`, **libera el lock y recién entonces espera el `fsync`**: el
+  primero que espera hace un `fsync` que cubre todos los commits escritos hasta ese momento
+  (*group commit*), y una lectura sólo devuelve resultados cuando lo que vio ya es durable.
 - **Checkpoint atómico con doublewrite buffer**: al superar 8 MiB de WAL, con `CHECKPOINT` o al
   cerrar. Los nodos de índice modificados se serializan en sus páginas. Luego todas las páginas
   sucias, junto con el catálogo nuevo, se escriben primero en `doublewrite.buf` (con CRC) y se
@@ -242,7 +244,9 @@ líneas de Python sin dependencias.
 | B+tree: inserción aleatoria (100k claves) | ~9 M claves/s |
 | B+tree: búsqueda (1M claves) | ~250 ns |
 | Parseo de un SELECT con JOIN/GROUP BY | ~5 µs |
-| INSERT en autocommit sin fsync / con fsync | ~128k/s / ~8k/s |
+| INSERT durables (`fsync`) con 1 / 4 / 16 clientes concurrentes | ~580 / ~1.250 / ~3.860 por segundo (group commit) |
+| INSERT en autocommit sin `fsync` (`--no-sync`) | ~64k/s |
+| `ORDER BY id DESC LIMIT 10` sobre 100k filas (orden del índice) | ~37 µs |
 | 10.000 INSERT en una transacción | ~48 ms |
 | SELECT por clave primaria (100k filas) | ~10 µs |
 | El mismo SELECT como sentencia preparada | ~7.5 µs |

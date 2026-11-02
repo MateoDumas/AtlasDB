@@ -45,11 +45,17 @@ public:
     // Reads every intact record. A torn or corrupt tail is truncated away.
     std::vector<LogRecord> read_all();
 
+    // Makes everything appended so far durable. Safe to call while another
+    // thread appends (appends happen under the database lock). It uses its own
+    // handle: on Windows the C runtime locks a descriptor for the whole fsync,
+    // which would otherwise stall the next append behind it.
+    void sync() { sync_file_.sync(); }
     void reset();
     uint64_t size() const { return size_; }
 
 private:
     File file_;
+    File sync_file_;  // second handle to the same file, used only for fsync
     uint64_t size_ = 0;
 };
 

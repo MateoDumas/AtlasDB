@@ -221,3 +221,52 @@ TEST_CASE("concurrent readers see consistent snapshots while writers commit", "[
     CHECK(reads > 0);
     CHECK(t.scalar("SELECT SUM(balance) FROM acct").as_int() == total);
 }
+
+TEST_CASE("group commit shares fsyncs between concurrent commits", "[txn][concurrency][group-commit]") {
+    DatabaseOptions opts;
+    opts.lock_timeout = std::chrono::seconds(60);
+    TestDb t(opts, /*sync=*/true);
+    t.run("CREATE TABLE g (id INT PRIMARY KEY, worker INT)");
+    uint64_t syncs_before = t.db->wal_syncs();
+
+    constexpr int threads = 8, per_thread = 40;
+    std::atomic<int> reader_errors{0};
+    std::atomic<bool> stop{false};
+    std::thread reader([&] {
+        Session s(*t.db);
+        int64_t last = 0;
+        while (!stop) {
+            // Counts only ever grow: readers never see a commit that later disappears.
+            int64_t n = s.execute("SELECT COUNT(*) FROM g")[0].rows[0][0].as_int();
+            if (n < last) ++reader_errors;
+            last = n;
+        }
+    });
+    std::vector<std::thread> writers;
+    for (int w = 0; w < threads; ++w) {
+        writers.emplace_back([&, w] {
+            Session s(*t.db);
+            for (int i = 0; i < per_thread; ++i) {
+                int id = w * 1000 + i;
+                if (i % 4 == 0)
+                    s.execute("BEGIN; INSERT INTO g VALUES (" + std::to_string(id) + ", " + std::to_string(w) + "); COMMIT;");
+                else
+                    s.execute("INSERT INTO g VALUES (" + std::to_string(id) + ", " + std::to_string(w) + ")");
+            }
+        });
+    }
+    for (auto& w : writers) w.join();
+    stop = true;
+    reader.join();
+
+    CHECK(t.count("g") == threads * per_thread);
+    CHECK(reader_errors == 0);
+    uint64_t syncs = t.db->wal_syncs() - syncs_before;
+    INFO("fsyncs: " << syncs << " for " << threads * per_thread << " commits");
+    CHECK(syncs >= 1);
+    CHECK(syncs <= static_cast<uint64_t>(threads * per_thread));
+
+    // Everything acknowledged is in the WAL and survives a crash.
+    t.crash_and_recover();
+    CHECK(t.count("g") == threads * per_thread);
+}

@@ -36,8 +36,9 @@ struct TestDb {
     std::unique_ptr<Database> db;
     std::unique_ptr<Session> session;
 
-    explicit TestDb(DatabaseOptions opts = {}) : options(opts) {
-        options.sync_commits = false;  // tests do not need real fsyncs
+    // Tests skip real fsyncs unless they ask for them (sync = true).
+    explicit TestDb(DatabaseOptions opts = {}, bool sync = false) : options(opts) {
+        options.sync_commits = sync;
         open();
     }
     ~TestDb() { close(); }
