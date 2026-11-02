@@ -1,6 +1,6 @@
 # AtlasDB
 
-*[Read in English](README.md)*
+*[Read in English](README.md)* · [Changelog](CHANGELOG.md) · [Descargar la última versión](https://github.com/MateoDumas/AtlasDB/releases/latest)
 
 Base de datos relacional pequeña escrita en C++20: almacenamiento persistente en páginas,
 lenguaje de consultas inspirado en SQL, índices B+tree, transacciones, recuperación mediante
@@ -284,6 +284,6 @@ src/engine    expresiones, operadores, planificador, base de datos, sesiones
 src/net       sockets, protocolo, servidor, cliente
 apps/         atlasdb (CLI) y atlasdb-server
 examples/     cliente C++ y cliente Python
-tests/        tests Catch2 (63 casos)
+tests/        tests Catch2 (73 casos)
 bench/        benchmarks Google Benchmark
 ```

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(AtlasDB VERSION 0.1.0 LANGUAGES CXX)
+project(AtlasDB VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -58,6 +58,7 @@ add_library(atlas_core STATIC
   src/net/client.cpp
 )
 target_include_directories(atlas_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(atlas_core PUBLIC ATLAS_VERSION="${PROJECT_VERSION}")
 target_link_libraries(atlas_core PUBLIC Threads::Threads)
 if(WIN32)
   target_link_libraries(atlas_core PUBLIC ws2_32)

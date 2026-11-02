@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-24.04
+          - name: macos-arm64
+            os: macos-14
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Ninja
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update && sudo apt-get install -y ninja-build; else brew install ninja; fi
+      - name: Build and test
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DATLAS_BUILD_BENCHMARKS=OFF
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+      - name: Package
+        run: |
+          pkg=atlasdb-${GITHUB_REF_NAME}-${{ matrix.name }}
+          mkdir -p "$pkg"
+          cp build/atlasdb build/atlasdb-server build/client_example "$pkg/"
+          cp README.md LICENSE CHANGELOG.md examples/python_client.py "$pkg/"
+          tar czf "$pkg.tar.gz" "$pkg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: atlasdb-*.tar.gz
+
+  build-windows:
+    name: Build windows-x64
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            git
+            zip
+      - name: Build and test
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DATLAS_BUILD_BENCHMARKS=OFF
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+      - name: Package
+        run: |
+          pkg=atlasdb-${GITHUB_REF_NAME}-windows-x64
+          mkdir -p "$pkg"
+          cp build/atlasdb.exe build/atlasdb-server.exe build/client_example.exe "$pkg/"
+          cp README.md LICENSE CHANGELOG.md examples/python_client.py "$pkg/"
+          zip -r "$pkg.zip" "$pkg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: atlasdb-*.zip
+
+  release:
+    name: Publish GitHub release
+    needs: [build, build-windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v head="## [$version]" '
+            index($0, head) == 1 { found = 1; next }
+            found && index($0, "## [") == 1 { exit }
+            found && index($0, "[") == 1 { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: AtlasDB ${{ github.ref_name }}
+          body_path: notes.md
+          files: dist/*

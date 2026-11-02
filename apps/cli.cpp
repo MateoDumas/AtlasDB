@@ -15,6 +15,7 @@
 
 #include "common/error.h"
 #include "common/result.h"
+#include "common/version.h"
 #include "engine/database.h"
 #include "engine/session.h"
 #include "net/client.h"
@@ -88,6 +89,7 @@ void print_usage() {
                  "\nOptions:\n"
                  "  -c, --command SQL   execute SQL and exit\n"
                  "  -f, --file PATH     execute a SQL script and exit\n"
+                 "  -v, --version       print the version\n"
                  "  -h, --help          show this help\n";
 }
 
@@ -187,7 +189,7 @@ struct Shell {
     // otherwise (piped input) it stays quiet. Returns false if any statement failed.
     bool repl(bool interactive) {
         if (interactive)
-            std::cout << "AtlasDB 0.1.0 - connected to " << backend.description() << "\n"
+            std::cout << PRODUCT << " - connected to " << backend.description() << "\n"
                       << "Type .help for help, .quit to exit.\n";
         bool all_ok = true;
         std::string buffer, line;
@@ -241,6 +243,9 @@ int main(int argc, char** argv) {
         };
         if (a == "-h" || a == "--help") {
             print_usage();
+            return 0;
+        } else if (a == "-v" || a == "--version") {
+            std::cout << PRODUCT << "\n";
             return 0;
         } else if (a == "--connect") {
             connect = need("--connect");

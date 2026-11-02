@@ -9,6 +9,7 @@
 #include <string>
 #include <thread>
 
+#include "common/version.h"
 #include "engine/database.h"
 #include "net/protocol.h"
 #include "net/socket.h"
@@ -19,7 +20,7 @@ struct ServerOptions {
     std::string host = "127.0.0.1";
     uint16_t port = proto::DEFAULT_PORT;  // 0 = pick a free port
     size_t max_connections = 64;
-    std::string name = "AtlasDB 0.1.0";
+    std::string name = PRODUCT;
     // A client that leaves a transaction open without sending anything for this
     // long has it rolled back and its connection closed, so it cannot keep the
     // database locked forever. Zero disables the timeout.

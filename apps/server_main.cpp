@@ -7,6 +7,7 @@
 #include <string>
 #include <thread>
 
+#include "common/version.h"
 #include "engine/database.h"
 #include "net/server.h"
 
@@ -26,6 +27,7 @@ void print_usage() {
                  "  --max-connections N     concurrent client limit (default: 64)\n"
                  "  --no-sync               do not fsync the WAL on commit (faster, less durable)\n"
                  "  --idle-txn-timeout SEC  roll back transactions idle this long (default: 60, 0 = never)\n"
+                 "  -v, --version           print the version\n"
                  "  -h, --help              show this help\n";
 }
 
@@ -47,6 +49,9 @@ int main(int argc, char** argv) {
         };
         if (a == "-h" || a == "--help") {
             print_usage();
+            return 0;
+        } else if (a == "-v" || a == "--version") {
+            std::cout << PRODUCT << "\n";
             return 0;
         } else if (a == "--data") {
             dir = need();

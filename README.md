@@ -4,7 +4,7 @@
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-*[Leer en español](README.es.md)*
+*[Leer en español](README.es.md)* · [Changelog](CHANGELOG.md) · [Download the latest release](https://github.com/MateoDumas/AtlasDB/releases/latest)
 
 A small relational database written from scratch in C++20, with no dependencies beyond the
 standard library: paged storage, persistent B+tree indexes, a SQL dialect, transactions,
@@ -48,11 +48,15 @@ ERROR (constraint_violation): foreign key violation: books.author_id = 99 has no
 - **Network server**: the AtlasDB Wire Protocol (AWP), a multithreaded server, prepared
   statements with `$1` / `?` parameters (no SQL injection by construction), and idle-transaction
   timeouts.
-- **Tested**: 63 Catch2 test cases including randomized crash/recovery runs, concurrency stress
-  tests, and torn-page repair; a Google Benchmark suite; CI on Linux, macOS and Windows with
-  AddressSanitizer, UndefinedBehaviorSanitizer and ThreadSanitizer jobs.
+- **Tested**: 73 Catch2 test cases including randomized crash/recovery runs, concurrency stress
+  tests, torn-page repair and mutation fuzzing; coverage-guided libFuzzer targets; a Google
+  Benchmark suite; CI on Linux, macOS and Windows with AddressSanitizer,
+  UndefinedBehaviorSanitizer and ThreadSanitizer jobs.
 
 ## Quick start
+
+Prebuilt binaries for Linux, macOS and Windows are attached to each
+[release](https://github.com/MateoDumas/AtlasDB/releases). To build from source:
 
 Requirements: CMake ≥ 3.20 and a C++20 compiler (GCC 11+, Clang 14+). Catch2 and Google
 Benchmark are fetched automatically on the first configure.
