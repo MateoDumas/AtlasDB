@@ -1,5 +1,7 @@
 # AtlasDB
 
+*[Read in English](README.md)*
+
 Base de datos relacional pequeña escrita en C++20: almacenamiento persistente en páginas,
 lenguaje de consultas inspirado en SQL, índices B+tree, transacciones, recuperación mediante
 WAL, restricciones de integridad, una CLI y un **protocolo de red propio** para usarla desde
@@ -42,6 +44,10 @@ Ejecutables generados:
 | `client_example`  | Ejemplo de aplicación externa en C++ usando la librería cliente |
 | `atlas_tests`     | Suite de tests (Catch2)                                       |
 | `atlas_bench`     | Benchmarks (Google Benchmark)                                 |
+
+El proyecto se distribuye bajo la licencia [MIT](LICENSE). El CI ([.github/workflows/ci.yml](.github/workflows/ci.yml))
+compila y corre los tests en Linux (GCC y Clang), macOS y Windows, más jobs con AddressSanitizer,
+UndefinedBehaviorSanitizer y ThreadSanitizer.
 
 ## Uso
 
@@ -275,6 +281,6 @@ src/engine    expresiones, operadores, planificador, base de datos, sesiones
 src/net       sockets, protocolo, servidor, cliente
 apps/         atlasdb (CLI) y atlasdb-server
 examples/     cliente C++ y cliente Python
-tests/        tests Catch2 (62 casos)
+tests/        tests Catch2 (63 casos)
 bench/        benchmarks Google Benchmark
 ```
