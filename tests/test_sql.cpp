@@ -274,3 +274,10 @@ TEST_CASE("parameterized queries and prepared statements", "[sql][params]") {
     CHECK_FALSE(s.has_prepared("ins"));
     CHECK_THROWS_WITH(t.run("SELECT * FROM emp WHERE id = $1"), ContainsSubstring("no values"));
 }
+
+TEST_CASE("output column names survive aggregation", "[sql]") {
+    TestDb t;
+    seed(t);
+    auto r = t.run("SELECT d.name, COUNT(*) AS n, MAX(e.salary) FROM dept d JOIN emp e ON e.dept_id = d.id GROUP BY d.name");
+    CHECK(r.columns == std::vector<std::string>{"name", "n", "MAX(e.salary)"});
+}

@@ -364,6 +364,9 @@ SelectPlan plan_select(Database& db, SelectStmt& s) {
         if (item.expr->kind == ExprKind::Column) return item.expr->name;
         return item.expr->to_string();
     };
+    // Names are taken now: aggregation later rewrites the expressions.
+    std::vector<std::string> output_names;
+    for (const auto& item : items) output_names.push_back(output_name(item));
     struct OrderRef {
         int output = -1;  // index into select items, or -1 for a hidden expression
         ExprPtr hidden;
@@ -443,7 +446,7 @@ SelectPlan plan_select(Database& db, SelectStmt& s) {
     SelectPlan plan;
     std::vector<ExprPtr> proj;
     for (auto& item : items) {
-        plan.column_names.push_back(output_name(item));
+        plan.column_names.push_back(output_names[proj.size()]);
         plan.column_types.push_back(infer_type(*item.expr, out_scope));
         proj.push_back(std::move(item.expr));
     }
