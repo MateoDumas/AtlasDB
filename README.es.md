@@ -7,13 +7,7 @@ lenguaje de consultas inspirado en SQL, índices B+tree, transacciones, recupera
 WAL, restricciones de integridad, una CLI y un **protocolo de red propio** para usarla desde
 aplicaciones externas.
 
-```
-atlas> CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INT CHECK (age >= 0));
-atlas> INSERT INTO users VALUES (1, 'Ana', 31), (2, 'Bruno', 27);
-atlas> EXPLAIN SELECT name FROM users WHERE id = 2;
-| Project [users.name]                                   |
-|   -> IndexScan users USING users_pkey (id = 2)          |
-```
+![Shell interactiva de AtlasDB: creación de tablas, un join con GROUP BY, EXPLAIN usando un índice, una violación de clave foránea y una transacción revertida](docs/demo.gif)
 
 ## Compilar
 

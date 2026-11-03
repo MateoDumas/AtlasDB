@@ -11,25 +11,7 @@ standard library: paged storage, persistent B+tree indexes, a SQL dialect, trans
 write-ahead logging with crash recovery, integrity constraints, a CLI, and its **own binary
 wire protocol** so that external applications (C++, Python, anything with sockets) can use it.
 
-```
-$ atlasdb library
-atlas> SELECT a.name, COUNT(b.id) AS books, MIN(b.year) AS first
-   ...>   FROM authors a LEFT JOIN books b ON b.author_id = a.id
-   ...>   GROUP BY a.name ORDER BY books DESC, a.name;
-+----------+-------+-------+
-| name     | books | first |
-+----------+-------+-------+
-| Borges   |     2 |  1944 |
-| Cortázar |     2 |  1951 |
-| Ocampo   |     0 |  NULL |
-+----------+-------+-------+
-(3 rows)
-atlas> EXPLAIN SELECT title FROM books WHERE year BETWEEN 1940 AND 1950;
-| Project [title]                                                  |
-|   -> IndexScan books USING books_year year BETWEEN 1940 AND 1950 |
-atlas> INSERT INTO books (id, title, author_id, year) VALUES (5, 'Ghost', 99, 2000);
-ERROR (constraint_violation): foreign key violation: books.author_id = 99 has no matching row in 'authors.id'
-```
+![AtlasDB interactive shell: creating tables, a join with GROUP BY, EXPLAIN using an index, a foreign key violation and a rolled-back transaction](docs/demo.gif)
 
 ## Highlights
 
